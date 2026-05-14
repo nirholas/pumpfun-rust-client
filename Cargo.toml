@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.86"
 name = "pump-rust-client"
-version = "0.1.0"
+version = "0.1.1"
 build = false
 autolib = false
 autobins = false
@@ -120,30 +120,30 @@ version = "1"
 optional = true
 
 [dependencies.solana-client]
-version = "2"
+version = "2.1.21"
 optional = true
 
 [dependencies.solana-faucet]
-version = "2"
+version = "2.1.21"
 optional = true
 
 [dependencies.solana-program]
-version = "2"
+version = "2.1.21"
 
 [dependencies.solana-rpc]
-version = "2"
+version = "2.1.21"
 optional = true
 
 [dependencies.solana-sdk]
-version = "2"
+version = "2.1.21"
 optional = true
 
 [dependencies.solana-streamer]
-version = "2"
+version = "2.1.21"
 optional = true
 
 [dependencies.solana-test-validator]
-version = "2"
+version = "2.1.21"
 optional = true
 
 [dependencies.spl-token]
@@ -164,10 +164,10 @@ version = "0.13"
 optional = true
 
 [dev-dependencies.solana-client]
-version = "2"
+version = "2.1.21"
 
 [dev-dependencies.solana-sdk]
-version = "2"
+version = "2.1.21"
 
 [dev-dependencies.tokio]
 version = "1.44.1"

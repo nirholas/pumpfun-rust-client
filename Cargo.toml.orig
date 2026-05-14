@@ -1,6 +1,6 @@
 [package]
 name = "pump-rust-client"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.86"
 resolver = "3"
@@ -34,16 +34,16 @@ local-validator = [
 [dependencies]
 anchor-lang = { version = "0.31", features = ["event-cpi", "init-if-needed", "allow-missing-optionals"] }
 anchor-spl = { version = "0.31", features = ["metadata", "spl-token-group-interface", "token_2022", "spl-token-metadata-interface", "token_2022_extensions", "spl-token-2022"] }
-solana-program = "2"
+solana-program = "2.1.21"
 
-solana-sdk = { version = "2", optional = true }
-solana-client = { version = "2", optional = true }
+solana-sdk = { version = "2.1.21", optional = true }
+solana-client = { version = "2.1.21", optional = true }
 
 # Optional deps used only when the `local-validator` feature is enabled.
-solana-test-validator = { version = "2", optional = true }
-solana-faucet = { version = "2", optional = true }
-solana-streamer = { version = "2", optional = true }
-solana-rpc = { version = "2", optional = true }
+solana-test-validator = { version = "2.1.21", optional = true }
+solana-faucet = { version = "2.1.21", optional = true }
+solana-streamer = { version = "2.1.21", optional = true }
+solana-rpc = { version = "2.1.21", optional = true }
 spl-token = { version = "=7.0.0", optional = true }
 spl-token-2022 = { version = "=6.0.0", optional = true }
 tokio = { version = "1.44.1", features = ["full"], optional = true }
@@ -65,6 +65,6 @@ path = "src/bin/clone_devnet_accounts/main.rs"
 required-features = ["local-validator"]
 
 [dev-dependencies]
-solana-sdk = "2"
-solana-client = "2"
+solana-sdk = "2.1.21"
+solana-client = "2.1.21"
 tokio = { version = "1.44.1", features = ["full"] }
