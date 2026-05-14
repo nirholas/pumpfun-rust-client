@@ -118,6 +118,19 @@ pub mod pump_amm {
     }
 }
 
+// ----------------------------------------------------------------------
+// Named pump_agent_payments-account decoders
+// ----------------------------------------------------------------------
+
+pub mod pump_agent_payments {
+    use super::{decode, Result};
+    use crate::state::pump_agent_payments::GlobalConfig;
+
+    pub fn decode_global_config(data: &[u8]) -> Result<GlobalConfig> {
+        decode::<GlobalConfig>(data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,3 +8,7 @@ pub mod pump_amm {
         UserVolumeAccumulator,
     };
 }
+
+pub mod pump_agent_payments {
+    pub use crate::pump_agent_payments::accounts::GlobalConfig;
+}

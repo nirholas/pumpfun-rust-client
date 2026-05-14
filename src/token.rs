@@ -13,18 +13,22 @@ pub use anchor_spl::associated_token::spl_associated_token_account::instruction:
 
 use crate::{constants, pda};
 
-/// `system_transfer(user → user_wsol_ata, lamports)` followed by
-/// `sync_native(user_wsol_ata)`. Used before any wSOL-quoted buy.
-pub fn wrap_sol_instructions(user: &Pubkey, lamports: u64) -> [Instruction; 2] {
-    let user_wsol_ata = pda::associated_token(
+fn user_wsol_ata(user: &Pubkey) -> Pubkey {
+    pda::associated_token(
         user,
         &constants::SPL_TOKEN_PROGRAM_ID,
         &constants::NATIVE_MINT,
     )
-    .0;
+    .0
+}
+
+/// `system_transfer(user → user_wsol_ata, lamports)` followed by
+/// `sync_native(user_wsol_ata)`. Used before any wSOL-quoted buy.
+pub fn wrap_sol_instructions(user: &Pubkey, lamports: u64) -> [Instruction; 2] {
+    let ata = user_wsol_ata(user);
     [
-        system_instruction::transfer(user, &user_wsol_ata, lamports),
-        sync_native(&constants::SPL_TOKEN_PROGRAM_ID, &user_wsol_ata)
+        system_instruction::transfer(user, &ata, lamports),
+        sync_native(&constants::SPL_TOKEN_PROGRAM_ID, &ata)
             .expect("sync_native: token program id is constant"),
     ]
 }
@@ -32,18 +36,7 @@ pub fn wrap_sol_instructions(user: &Pubkey, lamports: u64) -> [Instruction; 2] {
 /// `close_account(user_wsol_ata)` with destination and owner both `user`.
 /// Unwraps the wSOL balance back to lamports on the user's main account.
 pub fn unwrap_sol_instruction(user: &Pubkey) -> Instruction {
-    let user_wsol_ata = pda::associated_token(
-        user,
-        &constants::SPL_TOKEN_PROGRAM_ID,
-        &constants::NATIVE_MINT,
-    )
-    .0;
-    close_account(
-        &constants::SPL_TOKEN_PROGRAM_ID,
-        &user_wsol_ata,
-        user,
-        user,
-        &[],
-    )
-    .expect("close_account: token program id is constant")
+    let ata = user_wsol_ata(user);
+    close_account(&constants::SPL_TOKEN_PROGRAM_ID, &ata, user, user, &[])
+        .expect("close_account: token program id is constant")
 }

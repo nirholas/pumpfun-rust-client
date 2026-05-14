@@ -1,11 +1,10 @@
-//! AMM (pump-swap) quoting. Ports `buyQuoteInput`, `buyBaseInput`, and
-//! `sellBaseInput` from `@pump-fun/pump-swap-sdk/src/sdk/{buy,sell}.ts`.
+//! AMM (pump-swap) quote helpers.
 
 use solana_program::pubkey::Pubkey;
 
 use crate::math::bonding_curve::TOKEN_SUPPLY;
-use crate::math::fees::{ceil_div, compute_amm_fee_bps, fee_amount, AmmFeeBps};
-use crate::math::utils::slippage_bounds;
+use crate::math::fees::{ceil_div, compute_amm_fee_bps, creator_fee_amount, fee_amount, AmmFeeBps};
+use crate::math::utils::{mul_div_u128, slippage_bounds};
 use crate::math::{QuoteError, QuoteResult};
 use crate::state::pump_amm::{FeeConfig, GlobalConfig};
 
@@ -73,8 +72,6 @@ pub fn buy_quote_input(ctx: &AmmContext<'_>, quote_in: u64) -> QuoteResult<BuyQu
     let total_fee_bps = lp_fee_bps + protocol_fee_bps + coin_creator_bps;
     let denom = 10_000u128 + total_fee_bps as u128;
 
-    // Strip fees from the user's spend, then run constant-product on the
-    // pre-fee amount (matches Raydium-style CPAMM).
     let effective_quote = (quote_in as u128) * 10_000 / denom;
     let base_out = (ctx.base_reserve as u128) * effective_quote
         / ((ctx.quote_reserve as u128) + effective_quote);
@@ -89,8 +86,6 @@ pub fn buy_quote_input(ctx: &AmmContext<'_>, quote_in: u64) -> QuoteResult<BuyQu
 pub fn buy_base_input(ctx: &AmmContext<'_>, base_out: u64) -> QuoteResult<BuyBaseInputResult> {
     ctx.check_reserves()?;
     if base_out >= ctx.base_reserve {
-        // `>=` covers both "more tokens than the pool holds" and the
-        // boundary case where the constant-product denominator would be 0.
         return Err(QuoteError::BaseOutExceedsReserve);
     }
 
@@ -114,11 +109,7 @@ pub fn buy_base_input(ctx: &AmmContext<'_>, base_out: u64) -> QuoteResult<BuyBas
 
     let lp = fee_amount(raw_quote, lp_fee_bps);
     let protocol = fee_amount(raw_quote, protocol_fee_bps);
-    let coin_creator = if *ctx.coin_creator == Pubkey::default() {
-        0
-    } else {
-        fee_amount(raw_quote, creator_fee_bps)
-    };
+    let coin_creator = creator_fee_amount(ctx.coin_creator, raw_quote, creator_fee_bps);
     let total = raw_quote + lp + protocol + coin_creator;
 
     Ok(BuyBaseInputResult {
@@ -150,11 +141,7 @@ pub fn sell_base_input(ctx: &AmmContext<'_>, base_in: u64) -> QuoteResult<SellBa
 
     let lp = fee_amount(raw_quote, lp_fee_bps);
     let protocol = fee_amount(raw_quote, protocol_fee_bps);
-    let coin_creator = if *ctx.coin_creator == Pubkey::default() {
-        0
-    } else {
-        fee_amount(raw_quote, creator_fee_bps)
-    };
+    let coin_creator = creator_fee_amount(ctx.coin_creator, raw_quote, creator_fee_bps);
     let total_fee = lp + protocol + coin_creator;
     if raw_quote < total_fee {
         return Err(QuoteError::FeesExceedOutput);
@@ -167,16 +154,7 @@ pub fn sell_base_input(ctx: &AmmContext<'_>, base_in: u64) -> QuoteResult<SellBa
     })
 }
 
-// ---------------------------------------------------------------------------
-// Fee-less constant-product primitives for pump-swap pools.
-//
-// Mirrors `mayhem-program::math::pump_swap_math` exactly: identical formulas
-// to the bonding-curve primitives with `pool_base_token_reserves ↔ vTokens`
-// and `pool_quote_token_reserves ↔ vSol`. The fee-aware functions above
-// layer LP / protocol / coin-creator fees on top of these same formulas.
-// ---------------------------------------------------------------------------
-
-/// Pure constant-product sell quote on an AMM pool, no fees applied.
+/// Constant-product sell quote, fees not applied.
 /// `out = amount * pool_quote / (pool_base + amount)`.
 pub fn sell_quote(
     pool_base_token_reserves: u64,
@@ -186,12 +164,8 @@ pub fn sell_quote(
     let amount = u128::from(amount);
     let v_quote = u128::from(pool_quote_token_reserves);
     let v_base = u128::from(pool_base_token_reserves);
-
-    amount
-        .checked_mul(v_quote)
-        .ok_or(QuoteError::MathOverflow)?
-        .checked_div(v_base.checked_add(amount).ok_or(QuoteError::MathOverflow)?)
-        .ok_or(QuoteError::MathOverflow)
+    let denom = v_base.checked_add(amount).ok_or(QuoteError::MathOverflow)?;
+    mul_div_u128(amount, v_quote, denom)
 }
 
 /// Pure constant-product buy quote on an AMM pool, no fees applied.
@@ -204,16 +178,10 @@ pub fn buy_token_quote_with_sol(
     let sol_amount = u128::from(sol_amount);
     let v_quote = u128::from(pool_quote_token_reserves);
     let v_base = u128::from(pool_base_token_reserves);
-
-    sol_amount
-        .checked_mul(v_base)
-        .ok_or(QuoteError::MathOverflow)?
-        .checked_div(
-            v_quote
-                .checked_add(sol_amount)
-                .ok_or(QuoteError::MathOverflow)?,
-        )
-        .ok_or(QuoteError::MathOverflow)
+    let denom = v_quote
+        .checked_add(sol_amount)
+        .ok_or(QuoteError::MathOverflow)?;
+    mul_div_u128(sol_amount, v_base, denom)
 }
 
 /// Inverse of [`sell_quote`]: given a desired SOL output, how many tokens
@@ -228,16 +196,10 @@ pub fn sell_token_quote_with_sol(
     let sol_amount = u128::from(sol_amount);
     let v_quote = u128::from(pool_quote_token_reserves);
     let v_base = u128::from(pool_base_token_reserves);
-
-    sol_amount
-        .checked_mul(v_base)
-        .ok_or(QuoteError::MathOverflow)?
-        .checked_div(
-            v_quote
-                .checked_sub(sol_amount)
-                .ok_or(QuoteError::MathOverflow)?,
-        )
-        .ok_or(QuoteError::MathOverflow)
+    let denom = v_quote
+        .checked_sub(sol_amount)
+        .ok_or(QuoteError::MathOverflow)?;
+    mul_div_u128(sol_amount, v_base, denom)
 }
 
 /// Validate that the AMM pool's current market cap is within
@@ -252,11 +214,7 @@ pub fn validate_market_cap(
     let v_quote = u128::from(pool_quote_token_reserves);
     let v_base = u128::from(pool_base_token_reserves);
 
-    let current = TOKEN_SUPPLY
-        .checked_mul(v_quote)
-        .ok_or(QuoteError::MathOverflow)?
-        .checked_div(v_base)
-        .ok_or(QuoteError::MathOverflow)?;
+    let current = mul_div_u128(TOKEN_SUPPLY, v_quote, v_base)?;
 
     let (min, max) =
         slippage_bounds(target_market_cap, slippage_bps).ok_or(QuoteError::MathOverflow)?;
@@ -271,7 +229,6 @@ pub fn validate_market_cap(
 mod tests {
     use super::*;
 
-    // Mid-pool fixture: pool holds 100 SOL of quote and 800M tokens of base.
     const POOL_QUOTE: u64 = 100_000_000_000;
     const POOL_BASE: u64 = 800_000_000_000_000;
 

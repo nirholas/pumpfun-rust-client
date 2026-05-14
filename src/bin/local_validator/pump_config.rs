@@ -5,8 +5,10 @@ use std::collections::HashSet;
 use solana_sdk::pubkey::Pubkey;
 
 use pump_rust_client::constants::{
-    pump::PROGRAM_ID as PUMP_PROGRAM_ID, pump_amm::PROGRAM_ID as PUMP_AMM_PROGRAM_ID, DEVNET_ALT,
-    FEE_PROGRAM_ID, MAINNET_ALT, MAYHEM_PROGRAM_ID, MPL_TOKEN_METADATA_PROGRAM_ID,
+    pump::PROGRAM_ID as PUMP_PROGRAM_ID,
+    pump_agent_payments::PROGRAM_ID as PUMP_AGENT_PAYMENTS_PROGRAM_ID,
+    pump_amm::PROGRAM_ID as PUMP_AMM_PROGRAM_ID, DEVNET_ALT, FEE_PROGRAM_ID, MAINNET_ALT,
+    MAYHEM_PROGRAM_ID, MPL_TOKEN_METADATA_PROGRAM_ID,
 };
 
 use crate::utils::ProgramsToAdd;
@@ -35,6 +37,10 @@ pub fn pump_programs_to_add() -> Vec<ProgramsToAdd> {
         ProgramsToAdd {
             name: "mpl_token_metadata".into(),
             program_id: MPL_TOKEN_METADATA_PROGRAM_ID,
+        },
+        ProgramsToAdd {
+            name: "pump_agent_payments".into(),
+            program_id: PUMP_AGENT_PAYMENTS_PROGRAM_ID,
         },
     ]
 }

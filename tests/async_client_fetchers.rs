@@ -26,9 +26,9 @@ use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
-use pump_rust_client::fixtures::{GRADUATED_DEVNET_MINT, NOT_GRADUATED_DEVNET_MINT};
 use pump_rust_client::{constants, pda, AsyncPumpClient, PumpClientError, PumpSdk};
 
+use common::fixtures::{GRADUATED_DEVNET_MINT, NOT_GRADUATED_DEVNET_MINT};
 use common::{
     airdrop_blocking, build_wsol_setup_tx, fee_recipients, load_alt, make_client, make_rpc,
     send_v0_tx, unwrap_sol_ix, DEFAULT_USER_LAMPORTS,
@@ -41,13 +41,17 @@ async fn buy_v2_for_user(
     client: &AsyncPumpClient,
     user: &Keypair,
     mint: Pubkey,
-    creator: Pubkey,
     amount: u64,
     max_sol_cost: u64,
 ) {
     let rpc = client.rpc().clone();
     let sdk = PumpSdk::new();
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(client).await;
+    let global = client.fetch_global().await.expect("fetch_global");
+    let bc = client
+        .fetch_bonding_curve(&mint)
+        .await
+        .expect("fetch_bonding_curve");
+    let (_fee_recipient, buyback_fee_recipient) = fee_recipients(client).await;
     let bonding_curve = pda::pump::bonding_curve(&mint).0;
 
     let setup_tx = build_wsol_setup_tx(
@@ -64,18 +68,18 @@ async fn buy_v2_for_user(
 
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
     let mut ixs: Vec<Instruction> = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    ixs.extend(sdk.buy_v2_instructions(
-        mint,
-        constants::NATIVE_MINT,
-        constants::SPL_TOKEN_2022_PROGRAM_ID,
-        constants::SPL_TOKEN_PROGRAM_ID,
-        user.pubkey(),
-        creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        amount,
-        max_sol_cost,
-    ));
+    ixs.extend(
+        sdk.buy_v2_instructions(
+            &global,
+            &bc,
+            mint,
+            constants::SPL_TOKEN_PROGRAM_ID,
+            user.pubkey(),
+            amount,
+            max_sol_cost,
+        )
+        .expect("buy_v2_instructions"),
+    );
     ixs.push(unwrap_sol_ix(&user.pubkey()));
     send_v0_tx(&rpc, &ixs, user, &[user], &alt).await;
 }
@@ -140,8 +144,8 @@ async fn fetch_bonding_curve_works_for_non_graduated_fixture() {
     );
     assert_eq!(
         bc.quote_mint,
-        constants::NATIVE_MINT,
-        "fixture quote should be wSOL"
+        Pubkey::default(),
+        "fixture quote should be Pubkey::default()"
     );
 }
 
@@ -192,16 +196,11 @@ async fn fetch_user_volume_accumulator_returns_none_then_some() {
         .expect("fetch UVA before any buy");
     assert!(pre.is_none(), "UVA must be None for a fresh user");
 
-    let bc = client
-        .fetch_bonding_curve(&NOT_GRADUATED_DEVNET_MINT)
-        .await
-        .unwrap();
     buy_v2_for_user(
         &client,
         &user,
         NOT_GRADUATED_DEVNET_MINT,
-        bc.creator,
-        1_000_000,
+        300_000_000,
         LAMPORTS_PER_SOL,
     )
     .await;
@@ -251,8 +250,7 @@ async fn fetch_buy_state_returns_bc_and_optional_user_ata() {
         &client,
         &user,
         NOT_GRADUATED_DEVNET_MINT,
-        pre.bonding_curve.creator,
-        1_000_000,
+        300_000_000,
         LAMPORTS_PER_SOL,
     )
     .await;
@@ -310,16 +308,11 @@ async fn fetch_sell_state_errors_until_user_holds_base() {
         other => panic!("expected AccountNotFound, got {other:?}"),
     }
 
-    let bc = client
-        .fetch_bonding_curve(&NOT_GRADUATED_DEVNET_MINT)
-        .await
-        .unwrap();
     buy_v2_for_user(
         &client,
         &user,
         NOT_GRADUATED_DEVNET_MINT,
-        bc.creator,
-        1_000_000,
+        300_000_000,
         LAMPORTS_PER_SOL,
     )
     .await;
@@ -371,8 +364,7 @@ async fn get_creator_vault_balance_grows_after_buy() {
         &client,
         &user,
         NOT_GRADUATED_DEVNET_MINT,
-        creator,
-        10_000_000, // larger buy → larger creator-fee credit, more reliable signal
+        300_000_000,
         LAMPORTS_PER_SOL,
     )
     .await;

@@ -1,5 +1,6 @@
-//! End-to-end coverage for the high-level [`PumpSdk::trade_tx_instructions`]
-//! and [`PumpSdk::create_coin_instructions`] entry-points, plus parity
+//! End-to-end coverage for [`PumpSdk::trade_tx_instructions`] /
+//! [`PumpSdk::trade_tx_instructions`] and [`PumpSdk::create_coin_instructions`],
+//! plus parity
 //! checks between the offline `*_quote_*` helpers and what the on-chain
 //! programs actually do (verified by simulating the trade tx the SDK
 //! built for that quote).
@@ -19,31 +20,20 @@ mod common;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
-use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
 use pump_rust_client::accounts::pump_amm::{decode_global_config, decode_pool};
-use pump_rust_client::fixtures::{GRADUATED_DEVNET_MINT, NOT_GRADUATED_DEVNET_MINT};
 use pump_rust_client::{
-    constants, pda, AmmQuoteSource, CreateCoinParams, PumpSdk, TradeTxParams, TradeVenue,
+    constants, pda, AmmQuoteSource, CreateCoinParams, PumpPoolCtx, PumpSdk, TradeTxParams,
 };
 
+use common::fixtures::{GRADUATED_DEVNET_MINT, NOT_GRADUATED_DEVNET_MINT};
 use common::{
     airdrop_blocking, build_wsol_setup_tx, fee_recipients, load_alt, make_client, make_rpc,
-    send_v0_tx, unwrap_sol_ix, user_wsol_ata, DEFAULT_USER_LAMPORTS,
+    send_v0_tx, token_balance, unwrap_sol_ix, user_wsol_ata, DEFAULT_USER_LAMPORTS,
 };
 
 const SLIPPAGE_BPS: u16 = 500; // 5% — generous, the test only needs simulation to pass
-
-async fn token_balance(
-    rpc: &solana_client::nonblocking::rpc_client::RpcClient,
-    ata: &Pubkey,
-) -> u64 {
-    match rpc.get_token_account_balance(ata).await {
-        Ok(amount) => amount.amount.parse().expect("token balance is u64"),
-        Err(_) => 0,
-    }
-}
 
 // ---------------------------------------------------------------------
 // Bonding-curve trade-tx flow.
@@ -60,16 +50,15 @@ async fn trade_tx_bonding_curve_buy_then_sell() {
     let client = make_client();
     let sdk = PumpSdk::new();
 
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
     let mint = NOT_GRADUATED_DEVNET_MINT;
     let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
 
+    let global = client.fetch_global().await.expect("fetch_global");
     let bc_pre = client
         .fetch_bonding_curve(&mint)
         .await
         .expect("fetch_bonding_curve for non-graduated fixture mint");
     assert!(!bc_pre.complete, "fixture must not be graduated");
-    let creator = bc_pre.creator;
 
     let user = Keypair::new();
     println!("[trade_tx/bc] user = {}", user.pubkey());
@@ -78,24 +67,26 @@ async fn trade_tx_bonding_curve_buy_then_sell() {
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
     let user_base_ata = pda::associated_token(&user.pubkey(), &base_token_program, &mint).0;
 
-    // ---- Buy 1M base units. `trade_tx_instructions` handles wSOL
+    // ---- Buy 300M base units. `trade_tx_instructions` handles wSOL
     //      wrap inside the same tx; we only have to set the SOL ceiling. ----
-    let buy_amount = 1_000_000u64;
+    let buy_amount = 300_000_000u64;
     let max_sol_cost = LAMPORTS_PER_SOL;
     let mut buy_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    buy_ixs.extend(sdk.trade_tx_instructions(TradeTxParams {
-        mint,
-        base_token_program,
-        user: user.pubkey(),
-        creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        is_buy: true,
-        venue: TradeVenue::BondingCurve,
-        is_cashback_coin: false,
-        base_amount: buy_amount,
-        sol_amount_threshold: max_sol_cost,
-    }));
+    buy_ixs.extend(
+        sdk.trade_tx_instructions(TradeTxParams {
+            mint,
+            base_token_program,
+            quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            user: user.pubkey(),
+            is_buy: true,
+            base_amount: buy_amount,
+            sol_amount_threshold: max_sol_cost,
+            pump_global: &global,
+            bonding_curve: &bc_pre,
+            pump_pool: None,
+        })
+        .expect("trade_tx buy ix"),
+    );
     let buy_sig = send_v0_tx(&rpc, &buy_ixs, &user, &[&user], &alt).await;
     println!("[trade_tx/bc] buy sig: {buy_sig}");
 
@@ -107,24 +98,26 @@ async fn trade_tx_bonding_curve_buy_then_sell() {
         "trade_tx BC buy must raise real_quote_reserves"
     );
 
-    // ---- Sell half. `trade_tx_instructions(is_buy=false)` skips the
-    //      SOL wrap (sell doesn't need it) but still appends close_account
-    //      so any residual wSOL is unwrapped. ----
-    let sell_amount = user_balance_after_buy / 2;
+    // ---- Sell the full balance. `trade_tx_instructions(is_buy=false)`
+    //      skips the SOL wrap (sell doesn't need it) but still appends
+    //      close_account so any residual wSOL is unwrapped. ----
+    let sell_amount = user_balance_after_buy;
     let mut sell_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    sell_ixs.extend(sdk.trade_tx_instructions(TradeTxParams {
-        mint,
-        base_token_program,
-        user: user.pubkey(),
-        creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        is_buy: false,
-        venue: TradeVenue::BondingCurve,
-        is_cashback_coin: false,
-        base_amount: sell_amount,
-        sol_amount_threshold: 1, // 1 lamport floor
-    }));
+    sell_ixs.extend(
+        sdk.trade_tx_instructions(TradeTxParams {
+            mint,
+            base_token_program,
+            quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            user: user.pubkey(),
+            is_buy: false,
+            base_amount: sell_amount,
+            sol_amount_threshold: 1, // 1 lamport floor
+            pump_global: &global,
+            bonding_curve: &bc_after_buy,
+            pump_pool: None,
+        })
+        .expect("trade_tx sell ix"),
+    );
     let sell_sig = send_v0_tx(&rpc, &sell_ixs, &user, &[&user], &alt).await;
     println!("[trade_tx/bc] sell sig: {sell_sig}");
 
@@ -154,7 +147,6 @@ async fn trade_tx_amm_buy_then_sell() {
     let client = make_client();
     let sdk = PumpSdk::new();
 
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
     let mint = GRADUATED_DEVNET_MINT;
     let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
 
@@ -166,6 +158,23 @@ async fn trade_tx_amm_buy_then_sell() {
         .expect("pool missing — re-clone after a graduated fixture mint");
     let pool = decode_pool(&pool_account.data).expect("decode_pool");
 
+    let global = client.fetch_global().await.expect("fetch_global");
+    let global_config = decode_global_config(
+        &rpc.get_account(&pda::pump_amm::global_config().0)
+            .await
+            .expect("pump_amm global_config")
+            .data,
+    )
+    .expect("decode_global_config");
+    let bonding_curve = client
+        .fetch_bonding_curve(&mint)
+        .await
+        .expect("bonding_curve for graduated mint");
+    assert!(
+        bonding_curve.complete,
+        "fixture mint must be migrated (complete bonding curve)"
+    );
+
     let user = Keypair::new();
     println!(
         "[trade_tx/amm] user = {} pool = {pool_address}",
@@ -176,22 +185,28 @@ async fn trade_tx_amm_buy_then_sell() {
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
     let user_base_ata = pda::associated_token(&user.pubkey(), &base_token_program, &mint).0;
 
-    let buy_amount = 1_000u64;
+    let buy_amount = 1_000_000u64;
     let max_sol_cost = LAMPORTS_PER_SOL;
     let mut buy_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    buy_ixs.extend(sdk.trade_tx_instructions(TradeTxParams {
-        mint,
-        base_token_program,
-        user: user.pubkey(),
-        creator: pool.coin_creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        is_buy: true,
-        venue: TradeVenue::Amm { pool: pool_address },
-        is_cashback_coin: pool.is_cashback_coin,
-        base_amount: buy_amount,
-        sol_amount_threshold: max_sol_cost,
-    }));
+    buy_ixs.extend(
+        sdk.trade_tx_instructions(TradeTxParams {
+            mint,
+            base_token_program,
+            quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            user: user.pubkey(),
+            is_buy: true,
+            base_amount: buy_amount,
+            sol_amount_threshold: max_sol_cost,
+            pump_global: &global,
+            bonding_curve: &bonding_curve,
+            pump_pool: Some(PumpPoolCtx {
+                pool: pool_address,
+                amm_global: &global_config,
+                pool_state: &pool,
+            }),
+        })
+        .expect("trade_tx AMM buy ix"),
+    );
     let buy_sig = send_v0_tx(&rpc, &buy_ixs, &user, &[&user], &alt).await;
     println!("[trade_tx/amm] buy sig: {buy_sig}");
 
@@ -201,21 +216,27 @@ async fn trade_tx_amm_buy_then_sell() {
         "trade_tx AMM buy amount"
     );
 
-    let sell_amount = user_balance_after_buy / 2;
+    let sell_amount = user_balance_after_buy;
     let mut sell_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    sell_ixs.extend(sdk.trade_tx_instructions(TradeTxParams {
-        mint,
-        base_token_program,
-        user: user.pubkey(),
-        creator: pool.coin_creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        is_buy: false,
-        venue: TradeVenue::Amm { pool: pool_address },
-        is_cashback_coin: pool.is_cashback_coin,
-        base_amount: sell_amount,
-        sol_amount_threshold: 1,
-    }));
+    sell_ixs.extend(
+        sdk.trade_tx_instructions(TradeTxParams {
+            mint,
+            base_token_program,
+            quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            user: user.pubkey(),
+            is_buy: false,
+            base_amount: sell_amount,
+            sol_amount_threshold: 0,
+            pump_global: &global,
+            bonding_curve: &bonding_curve,
+            pump_pool: Some(PumpPoolCtx {
+                pool: pool_address,
+                amm_global: &global_config,
+                pool_state: &pool,
+            }),
+        })
+        .expect("trade_tx AMM sell ix"),
+    );
     let sell_sig = send_v0_tx(&rpc, &sell_ixs, &user, &[&user], &alt).await;
     println!("[trade_tx/amm] sell sig: {sell_sig}");
 
@@ -244,17 +265,16 @@ async fn quote_bc_token_out_simulation_matches() {
     let client = make_client();
     let sdk = PumpSdk::new();
 
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
+    let (_fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
     let mint = NOT_GRADUATED_DEVNET_MINT;
-    let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
 
     let global = client.fetch_global().await.unwrap();
     let fee_config = client.fetch_fee_config().await.ok();
     let bc = client.fetch_bonding_curve(&mint).await.unwrap();
 
-    // Quote: I want exactly 1M base units; what's the slippage-adjusted
+    // Quote: I want exactly 300M base units; what's the slippage-adjusted
     // ceiling on SOL spent?
-    let target_amount = 1_000_000u64;
+    let target_amount = 300_000_000u64;
     let quote = sdk
         .buy_quote_bonding_curve_token_out(
             &global,
@@ -289,18 +309,18 @@ async fn quote_bc_token_out_simulation_matches() {
         .expect("setup tx for quote-parity simulation");
 
     let mut ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    ixs.extend(sdk.buy_v2_instructions(
-        mint,
-        constants::NATIVE_MINT,
-        base_token_program,
-        constants::SPL_TOKEN_PROGRAM_ID,
-        user.pubkey(),
-        bc.creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        target_amount,
-        quote.max_input,
-    ));
+    ixs.extend(
+        sdk.buy_v2_instructions(
+            &global,
+            &bc,
+            mint,
+            constants::SPL_TOKEN_PROGRAM_ID,
+            user.pubkey(),
+            target_amount,
+            quote.max_input,
+        )
+        .expect("buy_v2_instructions"),
+    );
     ixs.push(unwrap_sol_ix(&user.pubkey()));
 
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
@@ -342,7 +362,7 @@ async fn quote_amm_token_out_simulation_matches() {
     let client = make_client();
     let sdk = PumpSdk::new();
 
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
+    let (_fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
     let mint = GRADUATED_DEVNET_MINT;
     let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
 
@@ -378,7 +398,7 @@ async fn quote_amm_token_out_simulation_matches() {
         Err(_) => 0,
     };
 
-    let target_amount = 1_000u64;
+    let target_amount = 1_000_000u64;
     let quote = sdk
         .buy_quote_amm_token_out(
             &global_config,
@@ -414,20 +434,19 @@ async fn quote_amm_token_out_simulation_matches() {
         .expect("setup tx for AMM quote-parity simulation");
 
     let mut ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    ixs.extend(sdk.buy_amm_instructions(
-        pool_address,
-        mint,
-        constants::NATIVE_MINT,
-        base_token_program,
-        constants::SPL_TOKEN_PROGRAM_ID,
-        user.pubkey(),
-        pool.coin_creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        pool.is_cashback_coin,
-        target_amount,
-        quote.max_input,
-    ));
+    ixs.extend(
+        sdk.buy_amm_instructions(
+            pool_address,
+            &global_config,
+            &pool,
+            base_token_program,
+            constants::SPL_TOKEN_PROGRAM_ID,
+            user.pubkey(),
+            target_amount,
+            quote.max_input,
+        )
+        .expect("buy_amm_instructions"),
+    );
     ixs.push(unwrap_sol_ix(&user.pubkey()));
 
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
@@ -470,20 +489,21 @@ async fn quote_amm_token_out_simulation_matches() {
 // follow-up sell uses `trade_tx_instructions` against the same mint.
 // ---------------------------------------------------------------------
 
-#[tokio::test]
-#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
-async fn create_coin_then_trade_tx_sell() {
+async fn run_create_coin_then_trade_tx_sell(
+    mayhem_mode: bool,
+    cashback: bool,
+    tokenized_agent_buyback_bps: Option<u16>,
+) {
     let rpc = make_rpc();
     let client = make_client();
     let sdk = PumpSdk::new();
 
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
     let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
 
     let user = Keypair::new();
     let mint = Keypair::new();
     println!(
-        "[create_coin] user = {} mint = {}",
+        "[create_coin mayhem={mayhem_mode} cashback={cashback} agent_bps={tokenized_agent_buyback_bps:?}] user = {} mint = {}",
         user.pubkey(),
         mint.pubkey()
     );
@@ -492,51 +512,82 @@ async fn create_coin_then_trade_tx_sell() {
     let token_amount = 1_000_000_000u64;
     let max_sol_cost = LAMPORTS_PER_SOL;
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
+    let global = client.fetch_global().await.expect("fetch_global");
 
-    // ---- Tx 1: create_coin_instructions returns 9 ixs (create_v2 +
-    //            4 ATA + transfer + sync_native + buy_v2 + close).
-    //            Even with the ALT this is right at the edge of the
-    //            1232-byte limit, so ship without an extra
-    //            compute-budget prefix to leave headroom. ----
-    let create_ixs = sdk.create_coin_instructions(CreateCoinParams {
-        mint: mint.pubkey(),
-        user: user.pubkey(),
-        creator: user.pubkey(),
-        name: "TradeTx Test".into(),
-        symbol: "TXT".into(),
-        uri: "https://example.com/txt.json".into(),
-        mayhem_mode: false,
-        cashback: false,
-        fee_recipient,
-        buyback_fee_recipient,
-        token_amount,
-        max_sol_cost,
-    });
+    // ---- Tx 1: create_coin_instructions returns create_v2 + ATAs +
+    //            buy_v2 (+ optional agent_initialize); the program handles
+    //            SOL → wSOL internally so no client-side wrap/unwrap is
+    //            needed. ----
+    let create_ixs = sdk
+        .create_coin_instructions(CreateCoinParams {
+            mint: mint.pubkey(),
+            user: user.pubkey(),
+            creator: user.pubkey(),
+            name: "TradeTx Test".into(),
+            symbol: "TXT".into(),
+            uri: "https://example.com/txt.json".into(),
+            mayhem_mode,
+            cashback,
+            global: &global,
+            token_amount,
+            max_sol_cost,
+            tokenized_agent_buyback_bps,
+        })
+        .expect("create_coin_instructions");
     let create_sig = send_v0_tx(&rpc, &create_ixs, &user, &[&user, &mint], &alt).await;
     println!("[create_coin] create+buy sig: {create_sig}");
+
+    if tokenized_agent_buyback_bps.is_some() {
+        let token_agent_payments_pda = pda::pump_agent_payments::token_agent_payments(&mint.pubkey()).0;
+        let acct = rpc
+            .get_account(&token_agent_payments_pda)
+            .await
+            .expect("token_agent_payments account exists post-create");
+        assert_eq!(
+            acct.owner,
+            pump_rust_client::constants::pump_agent_payments::PROGRAM_ID,
+            "token_agent_payments owned by pump_agent_payments program",
+        );
+    }
 
     let user_base_ata =
         pda::associated_token(&user.pubkey(), &base_token_program, &mint.pubkey()).0;
     let balance_after_create = token_balance(&rpc, &user_base_ata).await;
     assert_eq!(balance_after_create, token_amount, "initial buy amount");
 
-    // ---- Tx 2: sell half via trade_tx_instructions. ----
-    let sell_amount = balance_after_create / 2;
+    let bc_after_create = client
+        .fetch_bonding_curve(&mint.pubkey())
+        .await
+        .expect("bonding_curve post-create");
+    assert_eq!(bc_after_create.creator, user.pubkey(), "creator preserved");
+    assert_eq!(
+        bc_after_create.is_mayhem_mode, mayhem_mode,
+        "mayhem_mode flag persisted"
+    );
+    assert_eq!(
+        bc_after_create.is_cashback_coin, cashback,
+        "cashback flag persisted"
+    );
+
+    // ---- Tx 2: sell the full balance via trade_tx_instructions. ----
+    let sell_amount = balance_after_create;
     let mut sell_ixs: Vec<Instruction> =
         vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    sell_ixs.extend(sdk.trade_tx_instructions(TradeTxParams {
-        mint: mint.pubkey(),
-        base_token_program,
-        user: user.pubkey(),
-        creator: user.pubkey(),
-        fee_recipient,
-        buyback_fee_recipient,
-        is_buy: false,
-        venue: TradeVenue::BondingCurve,
-        is_cashback_coin: false,
-        base_amount: sell_amount,
-        sol_amount_threshold: 1,
-    }));
+    sell_ixs.extend(
+        sdk.trade_tx_instructions(TradeTxParams {
+            mint: mint.pubkey(),
+            base_token_program,
+            quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            user: user.pubkey(),
+            is_buy: false,
+            base_amount: sell_amount,
+            sol_amount_threshold: 1,
+            pump_global: &global,
+            bonding_curve: &bc_after_create,
+            pump_pool: None,
+        })
+        .expect("trade_tx sell ix"),
+    );
     let sell_sig = send_v0_tx(&rpc, &sell_ixs, &user, &[&user], &alt).await;
     println!("[create_coin] sell sig: {sell_sig}");
 
@@ -547,6 +598,47 @@ async fn create_coin_then_trade_tx_sell() {
         "post-sell balance"
     );
     let bc = client.fetch_bonding_curve(&mint.pubkey()).await.unwrap();
-    assert_eq!(bc.creator, user.pubkey(), "creator preserved");
     assert!(!bc.complete, "fresh mint should not graduate from one buy");
+}
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn create_coin_then_trade_tx_sell() {
+    run_create_coin_then_trade_tx_sell(false, false, None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn create_coin_mayhem_then_trade_tx_sell() {
+    run_create_coin_then_trade_tx_sell(true, false, None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn create_coin_cashback_then_trade_tx_sell() {
+    run_create_coin_then_trade_tx_sell(false, true, None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn create_coin_mayhem_and_cashback_then_trade_tx_sell() {
+    run_create_coin_then_trade_tx_sell(true, true, None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn create_coin_with_tokenized_agent_then_trade_tx_sell() {
+    run_create_coin_then_trade_tx_sell(false, false, Some(5000)).await;
+}
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn create_coin_cashback_with_tokenized_agent_then_trade_tx_sell() {
+    run_create_coin_then_trade_tx_sell(false, true, Some(2500)).await;
+}
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn create_coin_mayhem_with_tokenized_agent_then_trade_tx_sell() {
+    run_create_coin_then_trade_tx_sell(true, false, Some(10000)).await;
 }

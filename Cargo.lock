@@ -4158,13 +4158,14 @@ dependencies = [
 
 [[package]]
 name = "pump-rust-client"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
  "bincode",
  "crossbeam-channel",
  "dotenvy",
+ "fastrand",
  "serde",
  "serde_json",
  "solana-client",

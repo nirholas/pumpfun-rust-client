@@ -1,7 +1,4 @@
-//! Async client: wraps a Solana RPC and composes `PumpSdk` with on-chain state.
-//!
-//! Mirrors `OnlinePumpSdk` in `pump-sdk/src/onlineSdk.ts`. Only the parts that
-//! actually need the network live here — instruction building stays on `PumpSdk`.
+//! RPC wrapper around [`crate::sdk::PumpSdk`].
 
 use std::sync::Arc;
 
@@ -32,7 +29,7 @@ pub struct AsyncPumpClient {
     sdk: PumpSdk,
 }
 
-/// Snapshot of the accounts a `buy` needs to construct its instruction list.
+/// Account snapshot for building a buy.
 #[derive(Debug)]
 pub struct BuyState {
     pub bonding_curve_account: Account,
@@ -40,17 +37,14 @@ pub struct BuyState {
     pub associated_user_account: Option<Account>,
 }
 
-/// Snapshot of the accounts a `sell` needs.
+/// Account snapshot for building a sell.
 #[derive(Debug)]
 pub struct SellState {
     pub bonding_curve_account: Account,
     pub bonding_curve: BondingCurve,
 }
 
-/// Optional compute-budget tuning prepended to a tx built by `AsyncPumpClient`.
-/// Both fields are independent — only the `Some` ones produce an instruction.
-/// When both are present the order is `set_compute_unit_limit` then
-/// `set_compute_unit_price` (the convention validators expect).
+/// Optional compute-budget instructions prepended to built transactions (limit, then price).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ComputeBudget {
     pub units: Option<u32>,
@@ -87,10 +81,6 @@ impl AsyncPumpClient {
     pub fn sdk(&self) -> &PumpSdk {
         &self.sdk
     }
-
-    // ------------------------------------------------------------------
-    // Single-account fetchers
-    // ------------------------------------------------------------------
 
     pub async fn fetch_global(&self) -> Result<Global> {
         let address = pda::pump::global().0;
@@ -136,16 +126,49 @@ impl AsyncPumpClient {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Multi-account fetchers (one round-trip)
-    // ------------------------------------------------------------------
-
     pub async fn fetch_buy_state(
         &self,
         mint: &Pubkey,
         user: &Pubkey,
         token_program: &Pubkey,
     ) -> Result<BuyState> {
+        let (bonding_curve_account, bonding_curve, associated_user_account) = self
+            .fetch_bonding_curve_with_user_token_account(mint, user, token_program)
+            .await?;
+        Ok(BuyState {
+            bonding_curve_account,
+            bonding_curve,
+            associated_user_account,
+        })
+    }
+
+    pub async fn fetch_sell_state(
+        &self,
+        mint: &Pubkey,
+        user: &Pubkey,
+        token_program: &Pubkey,
+    ) -> Result<SellState> {
+        let (bonding_curve_account, bonding_curve, associated_user_account) = self
+            .fetch_bonding_curve_with_user_token_account(mint, user, token_program)
+            .await?;
+        if associated_user_account.is_none() {
+            return Err(PumpClientError::AccountNotFound {
+                name: "associated_user",
+                address: pda::associated_token(user, token_program, mint).0,
+            });
+        }
+        Ok(SellState {
+            bonding_curve_account,
+            bonding_curve,
+        })
+    }
+
+    async fn fetch_bonding_curve_with_user_token_account(
+        &self,
+        mint: &Pubkey,
+        user: &Pubkey,
+        token_program: &Pubkey,
+    ) -> Result<(Account, BondingCurve, Option<Account>)> {
         let bonding_curve_address = pda::pump::bonding_curve(mint).0;
         let associated_user = pda::associated_token(user, token_program, mint).0;
 
@@ -165,59 +188,11 @@ impl AsyncPumpClient {
                     address: bonding_curve_address,
                 })?;
         let associated_user_account = accounts.next().flatten();
-
         let bonding_curve = decode_bonding_curve(&bonding_curve_account.data)?;
-        Ok(BuyState {
-            bonding_curve_account,
-            bonding_curve,
-            associated_user_account,
-        })
+        Ok((bonding_curve_account, bonding_curve, associated_user_account))
     }
 
-    pub async fn fetch_sell_state(
-        &self,
-        mint: &Pubkey,
-        user: &Pubkey,
-        token_program: &Pubkey,
-    ) -> Result<SellState> {
-        let bonding_curve_address = pda::pump::bonding_curve(mint).0;
-        let associated_user = pda::associated_token(user, token_program, mint).0;
-
-        let mut accounts = self
-            .rpc
-            .get_multiple_accounts(&[bonding_curve_address, associated_user])
-            .await
-            .map_err(PumpClientError::from)?
-            .into_iter();
-
-        let bonding_curve_account =
-            accounts
-                .next()
-                .flatten()
-                .ok_or(PumpClientError::AccountNotFound {
-                    name: "bonding_curve",
-                    address: bonding_curve_address,
-                })?;
-        if accounts.next().flatten().is_none() {
-            return Err(PumpClientError::AccountNotFound {
-                name: "associated_user",
-                address: associated_user,
-            });
-        }
-
-        let bonding_curve = decode_bonding_curve(&bonding_curve_account.data)?;
-        Ok(SellState {
-            bonding_curve_account,
-            bonding_curve,
-        })
-    }
-
-    // ------------------------------------------------------------------
-    // Higher-level helpers
-    // ------------------------------------------------------------------
-
-    /// Lamports held in the creator vault above the rent-exempt minimum.
-    /// Returns 0 when the vault is missing or under-funded.
+    /// Spendable lamports in the creator vault (above rent); 0 if missing or rent-only.
     pub async fn get_creator_vault_balance(&self, creator: &Pubkey) -> Result<u64> {
         let creator_vault = pda::pump::creator_vault(creator).0;
 
@@ -244,11 +219,7 @@ impl AsyncPumpClient {
         Ok(account.lamports - rent_exempt)
     }
 
-    // ------------------------------------------------------------------
-    // Tx lifecycle
-    // ------------------------------------------------------------------
-
-    /// Fetches a recent blockhash via the configured commitment.
+    /// Recent blockhash at the client's commitment.
     pub async fn latest_blockhash(&self) -> Result<Hash> {
         self.rpc
             .get_latest_blockhash()
@@ -256,9 +227,7 @@ impl AsyncPumpClient {
             .map_err(PumpClientError::from)
     }
 
-    /// Fetches a fresh blockhash and signs the resulting tx. Use
-    /// [`Self::build_transaction_with_blockhash`] when the blockhash is
-    /// supplied externally (e.g. batched sends, deterministic tests).
+    /// Fetches a blockhash then signs. Prefer [`Self::build_transaction_with_blockhash`] if you already have a hash.
     pub async fn build_transaction(
         &self,
         ixs: &[Instruction],
@@ -276,8 +245,7 @@ impl AsyncPumpClient {
         ))
     }
 
-    /// Sync builder. Prepends 0–2 compute-budget IXs (limit, then price), then
-    /// signs with the provided signers and blockhash.
+    /// Prepends compute-budget instructions when set, then signs.
     pub fn build_transaction_with_blockhash(
         &self,
         ixs: &[Instruction],
@@ -293,7 +261,7 @@ impl AsyncPumpClient {
         Transaction::new_signed_with_payer(&full_ixs, Some(payer), signers, recent_blockhash)
     }
 
-    /// Simulates a transaction. Returns the inner result (logs, units, err).
+    /// Simulate a transaction.
     pub async fn simulate_transaction<T: SerializableTransaction>(
         &self,
         tx: &T,
@@ -306,7 +274,7 @@ impl AsyncPumpClient {
         Ok(response.value)
     }
 
-    /// Submits a signed transaction without waiting for confirmation.
+    /// Send without waiting for confirmation.
     pub async fn send_transaction<T: SerializableTransaction>(&self, tx: &T) -> Result<Signature> {
         self.rpc
             .send_transaction(tx)
@@ -314,10 +282,7 @@ impl AsyncPumpClient {
             .map_err(PumpClientError::from)
     }
 
-    /// Submits a signed transaction and waits for confirmation per the
-    /// configured commitment. Suitable for tests and one-shot scripts; for
-    /// throughput-sensitive callers, drive `send_transaction` + polling
-    /// directly off the RPC client.
+    /// Send and confirm at the client's commitment.
     pub async fn send_and_confirm_transaction<T: SerializableTransaction>(
         &self,
         tx: &T,
@@ -327,10 +292,6 @@ impl AsyncPumpClient {
             .await
             .map_err(PumpClientError::from)
     }
-
-    // ------------------------------------------------------------------
-    // Internals
-    // ------------------------------------------------------------------
 
     async fn get_account(&self, address: &Pubkey, name: &'static str) -> Result<Account> {
         let value = self
@@ -351,21 +312,16 @@ mod tests {
     use super::*;
     use solana_sdk::{signature::Keypair, system_instruction};
 
-    /// `AsyncPumpClient` must be `Send + Sync + Clone` so callers can wrap it
-    /// in `Arc` and share it across tasks (mobile & backends rely on this).
     #[test]
     fn client_is_send_sync_clone() {
         fn assert_traits<T: Send + Sync + Clone>() {}
         assert_traits::<AsyncPumpClient>();
     }
 
-    /// Constructor smoke test — proves the type compiles end-to-end without
-    /// needing a live RPC.
     #[test]
     fn constructible_against_localhost() {
         let rpc = Arc::new(RpcClient::new("http://localhost:8899".to_string()));
         let client = AsyncPumpClient::new(rpc);
-        // The embedded SDK is the same offline one users can extract.
         let _: &PumpSdk = client.sdk();
     }
 
@@ -398,8 +354,6 @@ mod tests {
             }),
         );
 
-        // Order: SetComputeUnitLimit (discriminator 2), SetComputeUnitPrice
-        // (discriminator 3), then the original transfer.
         assert_eq!(tx.message.instructions.len(), 3);
         let cb_program = solana_sdk::compute_budget::id();
         assert_eq!(
@@ -432,7 +386,6 @@ mod tests {
             }),
         );
         assert_eq!(tx.message.instructions.len(), 2);
-        // First IX is the limit-setter; second is the original transfer.
         assert_eq!(tx.message.instructions[0].data.first(), Some(&2u8));
 
         let tx = client.build_transaction_with_blockhash(
@@ -442,7 +395,6 @@ mod tests {
             Hash::new_unique(),
             None,
         );
-        // No compute budget requested → just the transfer.
         assert_eq!(tx.message.instructions.len(), 1);
     }
 
@@ -467,9 +419,6 @@ mod tests {
         assert_eq!(tx.message.account_keys[0], payer.pubkey());
     }
 
-    /// Discriminator hint stays close to the test that depends on it. Asserts
-    /// `set_compute_unit_limit` and `set_compute_unit_price` keep their
-    /// historical encoding (1-byte discriminator at the head).
     #[test]
     fn compute_budget_helper_emits_known_discriminators() {
         let limit = ComputeBudgetInstruction::set_compute_unit_limit(0);

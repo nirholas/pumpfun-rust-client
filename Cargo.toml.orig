@@ -1,6 +1,6 @@
 [package]
 name = "pump-rust-client"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.86"
 # `resolver = "3"` requires Cargo's unstable `edition2024` (rejected by solana-verify / cargo 1.81).
@@ -33,6 +33,7 @@ local-validator = [
 ]
 
 [dependencies]
+fastrand = "2"
 anchor-lang = { version = "0.31", features = ["event-cpi", "init-if-needed", "allow-missing-optionals"] }
 anchor-spl = { version = "0.31", features = ["metadata", "spl-token-group-interface", "token_2022", "spl-token-metadata-interface", "token_2022_extensions", "spl-token-2022"] }
 solana-program = "2.1.21"
@@ -63,6 +64,36 @@ required-features = ["local-validator"]
 [[bin]]
 name = "clone_devnet_accounts"
 path = "src/bin/clone_devnet_accounts/main.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "create_v2"
+path = "examples/create_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "create_v2_and_buy"
+path = "examples/create_v2_and_buy.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "buy_v2"
+path = "examples/buy_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "sell_v2"
+path = "examples/sell_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "buy_amm"
+path = "examples/buy_amm.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "sell_amm"
+path = "examples/sell_amm.rs"
 required-features = ["local-validator"]
 
 [dev-dependencies]

@@ -30,30 +30,16 @@ mod common;
 use anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
-use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
-use pump_rust_client::accounts::pump_amm::decode_pool;
-use pump_rust_client::fixtures::{GRADUATED_DEVNET_MINT, NOT_GRADUATED_DEVNET_MINT};
+use pump_rust_client::accounts::pump_amm::{decode_global_config, decode_pool};
 use pump_rust_client::{constants, pda, PumpSdk};
 
+use common::fixtures::{GRADUATED_DEVNET_MINT, NOT_GRADUATED_DEVNET_MINT};
 use common::{
     airdrop_blocking, build_wsol_setup_tx, fee_recipients, load_alt, make_client, make_rpc,
-    send_v0_tx, unwrap_sol_ix, user_wsol_ata, DEFAULT_USER_LAMPORTS,
+    send_v0_tx, token_balance, unwrap_sol_ix, user_wsol_ata, DEFAULT_USER_LAMPORTS,
 };
-
-/// Read the parsed token amount on `ata`, defaulting to 0 if the
-/// account does not exist yet (handy before the first buy creates it).
-async fn token_balance(
-    rpc: &solana_client::nonblocking::rpc_client::RpcClient,
-    ata: &Pubkey,
-) -> u64 {
-    match rpc.get_token_account_balance(ata).await {
-        Ok(amount) => amount.amount.parse().expect("token balance is u64"),
-        // Account-not-found → no ATA → balance 0.
-        Err(_) => 0,
-    }
-}
 
 // ---------------------------------------------------------------------
 // Legacy (deprecated) v1 buy/sell.
@@ -148,9 +134,11 @@ async fn legacy_v1_buy_sell_full_flow() {
             user.pubkey(),
             user.pubkey(),
             fee_recipient,
+            buyback_fee_recipient,
             sell_amount,
             1, // floor: at least 1 lamport (no slippage assertion in this test)
             token_program,
+            false,
         ),
     ];
     let sell_sig = send_v0_tx(&rpc, &sell_ixs, &user, &[&user], &alt).await;
@@ -189,13 +177,13 @@ async fn v2_buy_sell_full_flow() {
     let client = make_client();
     let sdk = PumpSdk::new();
 
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
+    let _fee_recipient = fee_recipients(&client).await;
     let mint = NOT_GRADUATED_DEVNET_MINT;
     let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
     let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
-    let quote_mint = constants::NATIVE_MINT;
 
     // Sanity-check the snapshot before we burn airdropped SOL on it.
+    let global = client.fetch_global().await.expect("fetch_global");
     let bc_pre = client
         .fetch_bonding_curve(&mint)
         .await
@@ -204,52 +192,30 @@ async fn v2_buy_sell_full_flow() {
         !bc_pre.complete,
         "fixture {NOT_GRADUATED_DEVNET_MINT} should not be graduated yet"
     );
-    let creator = bc_pre.creator;
-
     let user = Keypair::new();
     println!("[v2] user = {} mint = {mint}", user.pubkey());
     airdrop_blocking(&rpc, &user.pubkey(), DEFAULT_USER_LAMPORTS).await;
 
-    let bonding_curve = pda::pump::bonding_curve(&mint).0;
     let user_base_ata = pda::associated_token(&user.pubkey(), &base_token_program, &mint).0;
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
 
     // Buy ~1 SOL worth, with a generous slippage ceiling for the test.
-    let buy_amount = 1_000_000u64; // 1M base units; tiny against any live curve
+    let buy_amount = 300_000_000u64; // 1M base units; tiny against any live curve
     let max_sol_cost = LAMPORTS_PER_SOL;
 
-    // ---- Tx 1: wSOL setup (3 ATAs + wrap_sol) — fits inside 1232B
-    //            without an ALT. ----
-    let setup_tx = build_wsol_setup_tx(
-        &rpc,
-        &user,
-        bonding_curve,
-        buyback_fee_recipient,
-        max_sol_cost,
-    )
-    .await;
-    rpc.send_and_confirm_transaction(&setup_tx)
-        .await
-        .expect("v2 wSOL setup tx");
-
-    // ---- Tx 2: buy_v2 + unwrap_sol. The 4 ATA prefixes inside
-    //            `buy_v2_instructions` are idempotent — they re-target
-    //            the wSOL ATAs the setup tx already initialized plus
-    //            the user's base ATA the program does not lazy-init. ----
     let mut buy_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    buy_ixs.extend(sdk.buy_v2_instructions(
-        mint,
-        quote_mint,
-        base_token_program,
-        quote_token_program,
-        user.pubkey(),
-        creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        buy_amount,
-        max_sol_cost,
-    ));
-    buy_ixs.push(unwrap_sol_ix(&user.pubkey()));
+    buy_ixs.extend(
+        sdk.buy_v2_instructions(
+            &global,
+            &bc_pre,
+            mint,
+            quote_token_program,
+            user.pubkey(),
+            buy_amount,
+            max_sol_cost,
+        )
+        .expect("buy_v2_instructions"),
+    );
     let buy_sig = send_v0_tx(&rpc, &buy_ixs, &user, &[&user], &alt).await;
     println!("[v2] buy sig: {buy_sig}");
 
@@ -273,21 +239,20 @@ async fn v2_buy_sell_full_flow() {
     //            of what we hold. Sell never wraps but the user's wSOL
     //            ATA needs to exist as a sink for proceeds; the
     //            `sell_v2_instructions` prefix does that idempotently. ----
-    let sell_amount = user_balance_after_buy / 2;
+    let sell_amount = user_balance_after_buy;
     let mut sell_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    sell_ixs.extend(sdk.sell_v2_instructions(
-        mint,
-        quote_mint,
-        base_token_program,
-        quote_token_program,
-        user.pubkey(),
-        creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        sell_amount,
-        1,
-    ));
-    sell_ixs.push(unwrap_sol_ix(&user.pubkey()));
+    sell_ixs.extend(
+        sdk.sell_v2_instructions(
+            &global,
+            &bc_after_buy,
+            mint,
+            quote_token_program,
+            user.pubkey(),
+            sell_amount,
+            1,
+        )
+        .expect("sell_v2_instructions"),
+    );
     let sell_sig = send_v0_tx(&rpc, &sell_ixs, &user, &[&user], &alt).await;
     println!("[v2] sell sig: {sell_sig}");
 
@@ -308,6 +273,81 @@ async fn v2_buy_sell_full_flow() {
 }
 
 // ---------------------------------------------------------------------
+// `buy_exact_quote_in_v2` against the cloned non-graduated devnet mint.
+//
+// Same fixture and account layout as `v2_buy_sell_full_flow`; the
+// difference is that we drive the buy with an exact quote amount and a
+// floor on tokens out, instead of an exact base amount with a quote
+// ceiling.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
+async fn v2_buy_exact_quote_in_full_flow() {
+    let rpc = make_rpc();
+    let client = make_client();
+    let sdk = PumpSdk::new();
+
+    let _ = fee_recipients(&client).await;
+    let mint = NOT_GRADUATED_DEVNET_MINT;
+    let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
+    let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
+
+    let global = client.fetch_global().await.expect("fetch_global");
+    let bc_pre = client
+        .fetch_bonding_curve(&mint)
+        .await
+        .expect("fetch_bonding_curve for non-graduated fixture mint");
+    assert!(
+        !bc_pre.complete,
+        "fixture {NOT_GRADUATED_DEVNET_MINT} should not be graduated yet"
+    );
+
+    let user = Keypair::new();
+    println!("[v2-exact-quote] user = {} mint = {mint}", user.pubkey());
+    airdrop_blocking(&rpc, &user.pubkey(), DEFAULT_USER_LAMPORTS).await;
+
+    let user_base_ata = pda::associated_token(&user.pubkey(), &base_token_program, &mint).0;
+    let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
+
+    // Spend exactly 0.5 SOL of quote, with no meaningful floor on tokens out.
+    let spendable_quote_in = LAMPORTS_PER_SOL / 2;
+    let min_tokens_out = 1u64;
+
+    let mut buy_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
+    buy_ixs.extend(
+        sdk.buy_exact_quote_in_v2_instructions(
+            &global,
+            &bc_pre,
+            mint,
+            quote_token_program,
+            user.pubkey(),
+            spendable_quote_in,
+            min_tokens_out,
+        )
+        .expect("buy_exact_quote_in_v2_instructions"),
+    );
+    let buy_sig = send_v0_tx(&rpc, &buy_ixs, &user, &[&user], &alt).await;
+    println!("[v2-exact-quote] buy sig: {buy_sig}");
+
+    let bc_after_buy = client
+        .fetch_bonding_curve(&mint)
+        .await
+        .expect("fetch bonding_curve after buy_exact_quote_in_v2");
+    assert!(
+        bc_after_buy.real_quote_reserves > bc_pre.real_quote_reserves,
+        "buy_exact_quote_in_v2 must have raised real_quote_reserves (pre={} post={})",
+        bc_pre.real_quote_reserves,
+        bc_after_buy.real_quote_reserves,
+    );
+    let user_balance_after_buy = token_balance(&rpc, &user_base_ata).await;
+    assert!(
+        user_balance_after_buy >= min_tokens_out,
+        "buy_exact_quote_in_v2 should credit at least min_tokens_out (got {user_balance_after_buy})"
+    );
+}
+
+// ---------------------------------------------------------------------
 // AMM buy/sell against the cloned graduated devnet mint.
 //
 // The cloned snapshot ships the post-migration `pump_amm` pool plus
@@ -323,7 +363,7 @@ async fn amm_buy_sell_full_flow() {
     let client = make_client();
     let sdk = PumpSdk::new();
 
-    let (fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
+    let (_fee_recipient, buyback_fee_recipient) = fee_recipients(&client).await;
     let mint = GRADUATED_DEVNET_MINT;
     let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
     let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
@@ -336,6 +376,13 @@ async fn amm_buy_sell_full_flow() {
         "pool account missing on local validator — re-run clone_devnet_accounts after a graduated mint",
     );
     let pool = decode_pool(&pool_account.data).expect("decode_pool on cloned snapshot");
+    let global_config = decode_global_config(
+        &rpc.get_account(&pda::pump_amm::global_config().0)
+            .await
+            .expect("pump_amm global_config")
+            .data,
+    )
+    .expect("decode_global_config");
     println!(
         "[amm] pool = {pool_address} coin_creator={} cashback={} base_acct={} quote_acct={}",
         pool.coin_creator,
@@ -351,7 +398,7 @@ async fn amm_buy_sell_full_flow() {
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
     let user_base_ata = pda::associated_token(&user.pubkey(), &base_token_program, &mint).0;
     let max_sol_cost = LAMPORTS_PER_SOL;
-    let base_amount_out = 1_000u64; // tiny: exact value depends on cloned pool reserves
+    let base_amount_out = 1_000_000u64; // tiny: exact value depends on cloned pool reserves
 
     // ---- Tx 1: AMM buy needs the user's base ATA, the user's wSOL ATA
     //            (sink for rent + source for quote-in), and the buyback
@@ -378,20 +425,19 @@ async fn amm_buy_sell_full_flow() {
     // ---- Tx 2: buy_amm_instructions (1 ATA prefix + buy_amm) +
     //            unwrap_sol. ----
     let mut buy_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    buy_ixs.extend(sdk.buy_amm_instructions(
-        pool_address,
-        mint,
-        quote_mint,
-        base_token_program,
-        quote_token_program,
-        user.pubkey(),
-        pool.coin_creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        pool.is_cashback_coin,
-        base_amount_out,
-        max_sol_cost,
-    ));
+    buy_ixs.extend(
+        sdk.buy_amm_instructions(
+            pool_address,
+            &global_config,
+            &pool,
+            base_token_program,
+            quote_token_program,
+            user.pubkey(),
+            base_amount_out,
+            max_sol_cost,
+        )
+        .expect("buy_amm_instructions"),
+    );
     buy_ixs.push(unwrap_sol_ix(&user.pubkey()));
     let buy_sig = send_v0_tx(&rpc, &buy_ixs, &user, &[&user], &alt).await;
     println!("[amm] buy sig: {buy_sig}");
@@ -410,22 +456,21 @@ async fn amm_buy_sell_full_flow() {
 
     // ---- Tx 3: sell_amm_instructions (1 ATA prefix + sell_amm) +
     //            unwrap_sol. Sell half of what we bought. ----
-    let sell_amount = user_balance_after_buy / 2;
+    let sell_amount = user_balance_after_buy;
     let mut sell_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    sell_ixs.extend(sdk.sell_amm_instructions(
-        pool_address,
-        mint,
-        quote_mint,
-        base_token_program,
-        quote_token_program,
-        user.pubkey(),
-        pool.coin_creator,
-        fee_recipient,
-        buyback_fee_recipient,
-        pool.is_cashback_coin,
-        sell_amount,
-        1,
-    ));
+    sell_ixs.extend(
+        sdk.sell_amm_instructions(
+            pool_address,
+            &global_config,
+            &pool,
+            base_token_program,
+            quote_token_program,
+            user.pubkey(),
+            sell_amount,
+            0,
+        )
+        .expect("sell_amm_instructions"),
+    );
     sell_ixs.push(unwrap_sol_ix(&user.pubkey()));
     let sell_sig = send_v0_tx(&rpc, &sell_ixs, &user, &[&user], &alt).await;
     println!("[amm] sell sig: {sell_sig}");

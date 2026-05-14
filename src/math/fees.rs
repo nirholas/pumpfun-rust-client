@@ -1,8 +1,4 @@
-//! Fee math shared by the bonding-curve and AMM quote paths.
-//!
-//! Ports `@pump-fun/pump-sdk-internal/src/fees.ts` and
-//! `@pump-fun/pump-swap-sdk/src/sdk/fees.ts`. All values are basis points
-//! (`u64`) the way the on-chain programs store them.
+//! Fee math for bonding-curve and AMM quotes (basis points as `u64`).
 
 use solana_program::pubkey::Pubkey;
 
@@ -12,16 +8,27 @@ use crate::pump_amm::types::{FeeTier as AmmFeeTier, Fees as AmmFees};
 use crate::state::pump_amm::{FeeConfig as AmmFeeConfig, GlobalConfig};
 use crate::state::{FeeConfig as PumpFeeConfig, Global};
 
-/// `ceil(a / b)` for non-zero `b`. Mirrors `ceilDiv` in both TS SDKs.
+/// `ceil(a / b)` for non-zero `b`.
 #[inline]
 pub fn ceil_div(a: u128, b: u128) -> u128 {
     a.div_ceil(b)
 }
 
-/// `ceil(amount * basis_points / 10_000)`. Mirrors `fee()` in both TS SDKs.
+/// `ceil(amount * basis_points / 10_000)`.
 #[inline]
 pub fn fee_amount(amount: u128, basis_points: u64) -> u128 {
     ceil_div(amount * basis_points as u128, 10_000)
+}
+
+/// `fee_amount(amount, basis_points)`, or `0` when `creator` is `Pubkey::default()`
+/// (the convention for "no creator fee on this trade").
+#[inline]
+pub fn creator_fee_amount(creator: &Pubkey, amount: u128, basis_points: u64) -> u128 {
+    if *creator == Pubkey::default() {
+        0
+    } else {
+        fee_amount(amount, basis_points)
+    }
 }
 
 /// Bonding-curve market cap in lamports.
@@ -67,9 +74,7 @@ pub struct AmmFeeBps {
     pub creator_fee_bps: u64,
 }
 
-/// Pick a tier whose threshold is the highest one `<=` `market_cap`. If
-/// `market_cap` is below every threshold, fall back to the first tier.
-/// Mirrors `calculateFeeTier` in both TS SDKs.
+/// Highest tier with threshold `<= market_cap`, else first tier.
 fn calculate_pump_fee_tier(tiers: &[PumpFeeTier], market_cap: u128) -> &PumpFees {
     let first = &tiers[0].fees;
     if market_cap < tiers[0].market_cap_lamports_threshold {
@@ -122,10 +127,7 @@ pub fn compute_bonding_curve_fee_bps(
     }
 }
 
-/// Resolve the bps for an AMM trade. Mirrors `pump-swap-sdk`'s
-/// `computeFeesBps`: pump pools (creator == pool-authority PDA) get tiered
-/// fees; third-party pools get the `flat_fees` table; with no `fee_config`,
-/// fall back to flat globals on `GlobalConfig`.
+/// AMM trade fee bps: tiered for pump pools, `flat_fees` for others, else globals.
 pub fn compute_amm_fee_bps(
     global_config: &GlobalConfig,
     fee_config: Option<&AmmFeeConfig>,

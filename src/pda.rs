@@ -1,16 +1,10 @@
-//! PDA derivations for the `pump` and `pump_amm` programs.
-//!
-//! Every helper mirrors a `pda.seeds` definition from the corresponding IDL
-//! and returns `(address, bump)` from `Pubkey::find_program_address`.
+//! PDA derivations for `pump` and `pump_amm`. Each returns `(Pubkey, bump)`.
 
 use solana_program::pubkey::Pubkey;
 
 use crate::constants;
 
-/// Standard SPL Associated Token Account derivation.
-///
-/// Used by every PDA in either IDL whose `program` field points at the ATA
-/// program (or whose seeds are `[owner, token_program, mint]` under SPL Token).
+/// SPL associated token account PDA.
 pub fn associated_token(owner: &Pubkey, token_program: &Pubkey, mint: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
@@ -30,7 +24,7 @@ pub mod pump {
         Pubkey::find_program_address(&[BONDING_CURVE_SEED, mint.as_ref()], &PROGRAM_ID)
     }
 
-    /// Sibling PDA the program reads as a remaining account on every `buy`/`sell`.
+    /// Remaining account on `buy` / `sell`.
     pub fn bonding_curve_v2(mint: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[BONDING_CURVE_V2_SEED, mint.as_ref()], &PROGRAM_ID)
     }
@@ -77,9 +71,7 @@ pub mod pump {
         )
     }
 
-    /// Per-mint fee-sharing config PDA owned by the `pump_fees` program.
-    /// Read by `buy_v2`/`sell_v2` to optionally route a slice of fees to
-    /// shareholders. Account may be uninitialized if the mint has no config.
+    /// Per-mint fee-sharing config (`pump_fees`); may be uninitialized.
     pub fn sharing_config(mint: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(
             &[SHARING_CONFIG_SEED, mint.as_ref()],
@@ -89,9 +81,7 @@ pub mod pump {
 }
 
 pub mod mayhem {
-    //! PDAs owned by the Mayhem program. Used by `create_v2`'s
-    //! `global_params`, `sol_vault`, `mayhem_state` and `mayhem_token_vault`
-    //! account fields.
+    //! Mayhem program PDAs referenced by `create_v2`.
     use super::*;
 
     pub const PROGRAM_ID: Pubkey = constants::MAYHEM_PROGRAM_ID;
@@ -112,8 +102,7 @@ pub mod mayhem {
         Pubkey::find_program_address(&[MAYHEM_STATE_SEED, mint.as_ref()], &PROGRAM_ID)
     }
 
-    /// Token-2022 ATA of (`sol_vault`, mint). Mirrors `getTokenVaultPda` in
-    /// `pump-sdk/src/pda.ts:112-119`.
+    /// Token-2022 ATA for (`sol_vault`, mint).
     pub fn mayhem_token_vault(mint: &Pubkey) -> (Pubkey, u8) {
         let (sol_vault_pda, _) = sol_vault();
         super::associated_token(&sol_vault_pda, &constants::SPL_TOKEN_2022_PROGRAM_ID, mint)
@@ -166,10 +155,31 @@ pub mod pump_amm {
         Pubkey::find_program_address(&[USER_VOLUME_ACCUMULATOR_SEED, user.as_ref()], &PROGRAM_ID)
     }
 
+    pub fn pool_v2(base_mint: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[POOL_V2_SEED, base_mint.as_ref()], &PROGRAM_ID)
+    }
+
     pub fn fee_config() -> (Pubkey, u8) {
         Pubkey::find_program_address(
             &[FEE_CONFIG_SEED, FEE_CONFIG_PROGRAM_SEED_KEY.as_ref()],
             &constants::FEE_PROGRAM_ID,
         )
+    }
+}
+
+pub mod pump_agent_payments {
+    use super::*;
+    use crate::constants::pump_agent_payments::*;
+
+    pub fn global_config() -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[GLOBAL_CONFIG_SEED], &PROGRAM_ID)
+    }
+
+    pub fn token_agent_payments(mint: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[TOKEN_AGENT_PAYMENTS_SEED, mint.as_ref()], &PROGRAM_ID)
+    }
+
+    pub fn event_authority() -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[EVENT_AUTHORITY_SEED], &PROGRAM_ID)
     }
 }

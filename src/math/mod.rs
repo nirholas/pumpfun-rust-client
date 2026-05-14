@@ -1,9 +1,4 @@
-//! Quote math primitives. Mirrors `@pump-fun/pump-sdk-internal` (bonding
-//! curve) and `@pump-fun/pump-swap-sdk` (AMM) so Rust callers can compute
-//! quotes locally without round-tripping through JS or the chain.
-//!
-//! All arithmetic uses `u128` intermediates; reserves and amounts are `u64`
-//! at the API boundary but their products do not fit in `u64`.
+//! Bonding-curve and AMM quote math (`u128` intermediates, `u64` at the boundary).
 
 pub mod amm;
 pub mod bonding_curve;
@@ -12,10 +7,7 @@ pub mod utils;
 
 pub use bonding_curve::TOKEN_SUPPLY;
 
-/// Reasons a quote computation can fail. Returned in place of a panic for
-/// any case where the inputs are inconsistent with a well-formed pool or
-/// trade — empty reserves, oversized requests, or fee configurations whose
-/// total bps would consume the entire trade.
+/// Quote failure modes (empty reserves, bad inputs, fee overflow, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuoteError {
     /// `base_reserve` or `quote_reserve` is zero, so the pool cannot price

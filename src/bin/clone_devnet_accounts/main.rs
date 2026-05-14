@@ -21,16 +21,24 @@
 use std::collections::HashMap;
 use std::fs;
 
+use anchor_lang::AccountSerialize;
+use anchor_spl::token::spl_token;
 use solana_client::rpc_client::RpcClient;
+use solana_program::program_pack::Pack;
 use solana_sdk::account::Account;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::rent::Rent;
 use solana_sdk::system_program;
 
 use pump_rust_client::accounts::pump_amm::decode_pool;
 use pump_rust_client::accounts::{decode_bonding_curve, decode_global};
 use pump_rust_client::constants;
-use pump_rust_client::fixtures::{FixtureMint, FIXTURE_MINTS};
 use pump_rust_client::pda;
+use pump_rust_client::state::Global;
+
+#[path = "../../../tests/common/fixtures.rs"]
+mod fixtures;
+use fixtures::{FixtureMint, FIXTURE_MINTS};
 
 const OUT_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -196,7 +204,12 @@ fn fixed_pdas(network: Network) -> Vec<(&'static str, Pubkey, bool)> {
             pda::pump_amm::global_volume_accumulator().0,
             false,
         ),
-        ("pump_amm:fee_config", pda::pump_amm::fee_config().0, false),
+        ("pump_amm:fee_config", pda::pump_amm::fee_config().0, true),
+        (
+            "pump_agent_payments:global_config",
+            pda::pump_agent_payments::global_config().0,
+            false,
+        ),
         ("mayhem:global_params", pda::mayhem::global_params().0, true),
         ("mayhem:sol_vault", pda::mayhem::sol_vault().0, true),
         // ALT for the cluster — required so the test's full create_coin
@@ -379,6 +392,80 @@ fn clone_fixture_mint(
     Ok(())
 }
 
+/// Whitelist [`fixtures::TEST_QUOTE_MINT`] inside the cloned `Global` so the
+/// program's `is_quote_mint_supported` check accepts it during local-validator
+/// `create_v2` / `buy_v2` / `sell_v2` flows. Idempotent: no-op if the mint is
+/// already in the array. The re-serialized bytes must be the same length as
+/// the original because `whitelisted_quote_mints` is fixed-size; the
+/// `assert_eq!` is a tripwire if the IDL ever drifts.
+fn whitelist_test_quote_mint_in_global(
+    out: &mut HashMap<Pubkey, Account>,
+    global: &Global,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if global
+        .whitelisted_quote_mints
+        .contains(&fixtures::TEST_QUOTE_MINT)
+    {
+        println!(
+            "🛠  Quote mint {} already whitelisted in Global — skipping",
+            fixtures::TEST_QUOTE_MINT
+        );
+        return Ok(());
+    }
+    let mut patched = global.clone();
+    patched.whitelisted_quote_mints[0] = fixtures::TEST_QUOTE_MINT;
+    let mut new_data = Vec::new();
+    patched.try_serialize(&mut new_data)?;
+    let key = pda::pump::global().0;
+    let entry = out
+        .get_mut(&key)
+        .expect("pump:global must be present in `out` before patching");
+    assert_eq!(
+        entry.data.len(),
+        new_data.len(),
+        "Global re-serialization changed data length ({} -> {}); IDL drift?",
+        entry.data.len(),
+        new_data.len()
+    );
+    entry.data = new_data;
+    println!(
+        "🛠  Whitelisted quote mint {} in Global",
+        fixtures::TEST_QUOTE_MINT
+    );
+    Ok(())
+}
+
+/// Insert a synthetic legacy SPL Token mint at [`fixtures::TEST_QUOTE_MINT`]
+/// owned by [`fixtures::TEST_QUOTE_MINT_AUTHORITY`] so tests can
+/// `mint_to` arbitrary balances on the local validator. Always overwrites:
+/// re-running the clone script regenerates a fresh mint with supply=0.
+fn synthesize_test_quote_mint(out: &mut HashMap<Pubkey, Account>) {
+    let mint = spl_token::state::Mint {
+        mint_authority: solana_program::program_option::COption::Some(
+            fixtures::TEST_QUOTE_MINT_AUTHORITY,
+        ),
+        supply: 0,
+        decimals: 6,
+        is_initialized: true,
+        freeze_authority: solana_program::program_option::COption::None,
+    };
+    let mut data = vec![0u8; spl_token::state::Mint::LEN];
+    spl_token::state::Mint::pack(mint, &mut data).expect("pack test quote Mint");
+    let acct = Account {
+        lamports: Rent::default().minimum_balance(spl_token::state::Mint::LEN),
+        data,
+        owner: spl_token::ID,
+        executable: false,
+        rent_epoch: 0,
+    };
+    out.insert(fixtures::TEST_QUOTE_MINT, acct);
+    println!(
+        "🛠  Synthesized test quote mint at {} (authority {})",
+        fixtures::TEST_QUOTE_MINT,
+        fixtures::TEST_QUOTE_MINT_AUTHORITY
+    );
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let cli = parse_cli().map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
@@ -417,8 +504,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ---- Phase 2: extract recipient pubkeys from the cloned Global. ----
+    // ---- Phase 2: extract recipient pubkeys from the cloned Global, then
+    //               patch the cloned Global to whitelist the test quote mint
+    //               so custom-quote v2 flows are accepted by the program. ----
     let global = decode_global(&global_account.expect("pump:global must be set above").data)?;
+    whitelist_test_quote_mint_in_global(&mut out, &global)?;
     let mut recipients: Vec<Pubkey> = Vec::new();
     recipients.push(global.fee_recipient);
     recipients.extend(global.fee_recipients.iter().copied());
@@ -459,6 +549,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for fixture in FIXTURE_MINTS {
         clone_fixture_mint(&rpc, &mut out, fixture)?;
     }
+
+    // ---- Phase 4b: seed the synthetic test quote mint so tests can mint it. ----
+    synthesize_test_quote_mint(&mut out);
 
     // ---- Phase 5: serialize + zstd-compress, write to artifacts/. ----
     let bytes = bincode::serialize(&out)?;

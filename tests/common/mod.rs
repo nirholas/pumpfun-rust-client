@@ -11,6 +11,8 @@
 
 #![allow(dead_code)]
 
+pub mod fixtures;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -140,8 +142,6 @@ pub async fn send_v0_tx(
     let signers_dyn: Vec<&dyn Signer> = signers.iter().map(|kp| *kp as &dyn Signer).collect();
     let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), &signers_dyn)
         .expect("sign versioned tx");
-    let size = bincode::serialize(&tx).expect("serialize v0 tx").len();
-    println!("v0 tx size: {size} bytes (limit 1232)");
     rpc.send_and_confirm_transaction(&tx)
         .await
         .expect("send_and_confirm_transaction — check local-validator logs for program error")
@@ -222,3 +222,13 @@ pub async fn build_wsol_setup_tx(
 /// Conservative default funding amount for tests: 50 SOL. Enough to
 /// cover any single SDK trade flow plus rent/fees several times over.
 pub const DEFAULT_USER_LAMPORTS: u64 = 50 * LAMPORTS_PER_SOL;
+
+/// Read the parsed token amount on `ata`, defaulting to 0 if the
+/// account does not exist yet (handy before the first buy creates it).
+pub async fn token_balance(rpc: &RpcClient, ata: &Pubkey) -> u64 {
+    match rpc.get_token_account_balance(ata).await {
+        Ok(amount) => amount.amount.parse().expect("token balance is u64"),
+        // Account-not-found → no ATA → balance 0.
+        Err(_) => 0,
+    }
+}

@@ -58,6 +58,17 @@ pub mod pump_amm {
     pub const EVENT_AUTHORITY_SEED: &[u8] = b"__event_authority";
     pub const GLOBAL_VOLUME_ACCUMULATOR_SEED: &[u8] = b"global_volume_accumulator";
     pub const USER_VOLUME_ACCUMULATOR_SEED: &[u8] = b"user_volume_accumulator";
+    pub const POOL_V2_SEED: &[u8] = b"pool-v2";
     pub const FEE_CONFIG_SEED: &[u8] = b"fee_config";
     pub const FEE_CONFIG_PROGRAM_SEED_KEY: Pubkey = PROGRAM_ID;
+}
+
+pub mod pump_agent_payments {
+    use super::*;
+
+    pub const PROGRAM_ID: Pubkey = crate::pump_agent_payments::ID;
+
+    pub const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
+    pub const TOKEN_AGENT_PAYMENTS_SEED: &[u8] = b"token-agent-payments";
+    pub const EVENT_AUTHORITY_SEED: &[u8] = b"__event_authority";
 }

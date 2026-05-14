@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.86"
 name = "pump-rust-client"
-version = "0.1.1"
+version = "0.1.4"
 build = false
 autolib = false
 autobins = false
@@ -23,7 +23,7 @@ autobenches = false
 description = "Rust SDK for the pump and pump_amm Solana programs: instruction builders, quoting, PDA helpers, and optional RPC client features."
 readme = "README.md"
 license = "MIT"
-resolver = "3"
+resolver = "2"
 
 [features]
 client = [
@@ -63,6 +63,36 @@ name = "local-validator"
 path = "src/bin/local_validator/main.rs"
 required-features = ["local-validator"]
 
+[[example]]
+name = "buy_amm"
+path = "examples/buy_amm.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "buy_v2"
+path = "examples/buy_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "create_v2"
+path = "examples/create_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "create_v2_and_buy"
+path = "examples/create_v2_and_buy.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "sell_amm"
+path = "examples/sell_amm.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "sell_v2"
+path = "examples/sell_v2.rs"
+required-features = ["local-validator"]
+
 [[test]]
 name = "async_client_fetchers"
 path = "tests/async_client_fetchers.rs"
@@ -72,12 +102,12 @@ name = "buy_sell_instructions"
 path = "tests/buy_sell_instructions.rs"
 
 [[test]]
-name = "create_v2_devnet_clone"
-path = "tests/create_v2_devnet_clone.rs"
-
-[[test]]
 name = "trade_tx_and_quotes"
 path = "tests/trade_tx_and_quotes.rs"
+
+[[test]]
+name = "v2_custom_quote_mint"
+path = "tests/v2_custom_quote_mint.rs"
 
 [dependencies.anchor-lang]
 version = "0.31"
@@ -109,6 +139,9 @@ optional = true
 [dependencies.dotenvy]
 version = "0.15"
 optional = true
+
+[dependencies.fastrand]
+version = "2"
 
 [dependencies.serde]
 version = "1"
