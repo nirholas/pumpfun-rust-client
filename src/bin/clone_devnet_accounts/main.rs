@@ -1,0 +1,478 @@
+//! Fetches the admin-initialized PDAs the SDK needs (`Global`, `FeeConfig`,
+//! mayhem `global-params`/`sol-vault`, the pump trade ALT, etc.) from a
+//! Solana cluster and dumps them to `artifacts/accounts_to_load.zst` — the
+//! file the local validator boots with via
+//! `src/bin/local_validator/main.rs`.
+//!
+//! Network selection (which ALT / fixture layout to use):
+//!   - `--network devnet|mainnet` (CLI), or `PUMP_NETWORK` — defaults to devnet.
+//!
+//! RPC endpoint precedence:
+//!   1. `--rpc-url <URL>` or a single positional `<RPC_URL>` (same meaning)
+//!   2. `PUMP_CLONE_RPC`
+//!   3. Public Solana cluster RPC for the selected network
+//!
+//! A `.env` in the current directory is loaded when present (`dotenvy`), so
+//! `PUMP_CLONE_RPC` / `PUMP_NETWORK` can live there.
+//!
+//! Run once before `cargo run --features local-validator --bin local-validator`:
+//!   `cargo run --features local-validator --bin clone_devnet_accounts -- --help`
+
+use std::collections::HashMap;
+use std::fs;
+
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::account::Account;
+use solana_sdk::pubkey::Pubkey;
+use solana_sdk::system_program;
+
+use pump_rust_client::accounts::pump_amm::decode_pool;
+use pump_rust_client::accounts::{decode_bonding_curve, decode_global};
+use pump_rust_client::constants;
+use pump_rust_client::fixtures::{FixtureMint, FIXTURE_MINTS};
+use pump_rust_client::pda;
+
+const OUT_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/artifacts/accounts_to_load.zst"
+);
+
+#[derive(Clone, Copy, Debug)]
+enum Network {
+    Devnet,
+    Mainnet,
+}
+
+impl Network {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mainnet" | "mainnet-beta" => Ok(Network::Mainnet),
+            "devnet" => Ok(Network::Devnet),
+            other => Err(format!(
+                "network must be devnet or mainnet (or mainnet-beta), got `{other}`"
+            )),
+        }
+    }
+
+    fn from_env() -> Self {
+        let s = std::env::var("PUMP_NETWORK").unwrap_or_else(|_| "devnet".into());
+        Self::parse(&s).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn default_rpc(self) -> &'static str {
+        match self {
+            // Public cluster RPCs (rate-limited). For dedicated providers, set `PUMP_CLONE_RPC`.
+            Network::Devnet => "https://api.devnet.solana.com",
+            Network::Mainnet => "https://api.mainnet-beta.solana.com",
+        }
+    }
+
+    fn alt(self) -> Pubkey {
+        match self {
+            Network::Devnet => constants::DEVNET_ALT,
+            Network::Mainnet => constants::MAINNET_ALT,
+        }
+    }
+
+    fn alt_label(self) -> &'static str {
+        match self {
+            Network::Devnet => "alt:devnet",
+            Network::Mainnet => "alt:mainnet",
+        }
+    }
+}
+
+struct Cli {
+    network: Option<Network>,
+    /// From `-r` / `--rpc-url` or a single positional argument.
+    rpc_url: Option<String>,
+}
+
+fn print_usage() {
+    println!(
+        "\
+clone_devnet_accounts — snapshot on-chain accounts for the local validator
+
+Usage:
+  clone_devnet_accounts [OPTIONS] [RPC_URL]
+
+Options:
+  -n, --network <NETWORK>   devnet | mainnet (sets which ALT / fixtures apply).
+                              Overrides PUMP_NETWORK.
+  -r, --rpc-url <URL>         RPC HTTP endpoint. Overrides PUMP_CLONE_RPC.
+  -h, --help                  Print this help.
+
+If RPC_URL is given as the first non-option argument, it is treated like --rpc-url.
+Do not pass both --rpc-url and a positional RPC_URL.
+
+RPC resolution: CLI (-r or positional) → PUMP_CLONE_RPC → public cluster RPC.
+
+A .env file in the current directory is loaded when present.
+
+Examples:
+  clone_devnet_accounts --network devnet
+  clone_devnet_accounts -r https://api.devnet.solana.com
+  clone_devnet_accounts https://api.mainnet-beta.solana.com --network mainnet
+"
+    );
+}
+
+fn parse_cli() -> Result<Cli, String> {
+    let mut network = None;
+    let mut rpc_flag = None;
+    let mut positional = None;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "-n" | "--network" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| "--network requires a value (devnet or mainnet)".to_string())?;
+                network = Some(Network::parse(&v)?);
+            }
+            "-r" | "--rpc-url" => {
+                let v = args
+                    .next()
+                    .ok_or_else(|| "--rpc-url requires a URL".to_string())?;
+                rpc_flag = Some(v);
+            }
+            s if s.starts_with('-') => {
+                return Err(format!("unknown option `{s}` (try --help)"));
+            }
+            s => {
+                if positional.is_some() {
+                    return Err(format!("unexpected extra argument `{s}`"));
+                }
+                positional = Some(s.to_string());
+            }
+        }
+    }
+
+    if rpc_flag.is_some() && positional.is_some() {
+        return Err("use either --rpc-url or one positional RPC URL, not both".into());
+    }
+
+    Ok(Cli {
+        network,
+        rpc_url: rpc_flag.or(positional),
+    })
+}
+
+/// `(label, address, required)`. Required entries panic if absent on the
+/// chosen cluster. Optional entries are skipped when not initialized
+/// (e.g. signer-only PDAs or program-state that's lazily created).
+fn fixed_pdas(network: Network) -> Vec<(&'static str, Pubkey, bool)> {
+    vec![
+        ("pump:global", pda::pump::global().0, true),
+        (
+            "pump:event_authority",
+            pda::pump::event_authority().0,
+            false,
+        ),
+        ("pump:mint_authority", pda::pump::mint_authority().0, false),
+        (
+            "pump:global_volume_accumulator",
+            pda::pump::global_volume_accumulator().0,
+            true,
+        ),
+        ("pump:fee_config", pda::pump::fee_config().0, true),
+        (
+            "pump_amm:global_config",
+            pda::pump_amm::global_config().0,
+            false,
+        ),
+        (
+            "pump_amm:event_authority",
+            pda::pump_amm::event_authority().0,
+            false,
+        ),
+        (
+            "pump_amm:global_volume_accumulator",
+            pda::pump_amm::global_volume_accumulator().0,
+            false,
+        ),
+        ("pump_amm:fee_config", pda::pump_amm::fee_config().0, false),
+        ("mayhem:global_params", pda::mayhem::global_params().0, true),
+        ("mayhem:sol_vault", pda::mayhem::sol_vault().0, true),
+        // ALT for the cluster — required so the test's full create_coin
+        // versioned tx can compress shared accounts under the 1232-byte limit.
+        (network.alt_label(), network.alt(), true),
+    ]
+}
+
+fn print_account(label: &str, key: &Pubkey, acct: &Account) {
+    println!(
+        "  {:<40} {} lamports={} owner={} data={}B",
+        label,
+        key,
+        acct.lamports,
+        acct.owner,
+        acct.data.len()
+    );
+}
+
+/// Pull `key` and stash it under `label`. Required entries panic when
+/// missing (the test depending on the fixture would fail more
+/// confusingly downstream); optional entries log a skip line.
+fn clone_one(
+    rpc: &RpcClient,
+    out: &mut HashMap<Pubkey, Account>,
+    label: &str,
+    key: Pubkey,
+    required: bool,
+) -> Result<Option<Account>, Box<dyn std::error::Error>> {
+    if let Some(existing) = out.get(&key) {
+        print_account(label, &key, existing);
+        return Ok(Some(existing.clone()));
+    }
+    let acct = rpc
+        .get_account_with_commitment(&key, rpc.commitment())?
+        .value;
+    match acct {
+        Some(acct) => {
+            print_account(label, &key, &acct);
+            out.insert(key, acct.clone());
+            Ok(Some(acct))
+        }
+        None if required => {
+            panic!("required fixture account `{label}` missing on cluster at {key}")
+        }
+        None => {
+            println!("  {:<40} {} (not on cluster — skipped)", label, key);
+            Ok(None)
+        }
+    }
+}
+
+/// Snapshot every PDA the SDK touches for `fixture.mint`. For graduated
+/// mints, also snapshots the post-migration `pump_amm` `Pool` and its
+/// base/quote/lp/creator-vault accounts so AMM tests have a working pool
+/// on the local validator without needing to run a migration.
+///
+/// Pool derivation matches canonical pump AMM `pool` PDA layout (see
+/// `pump-swap-sdk` / `PumpSdk::buy_quote_amm_*` with live vault balances):
+///   `pool_creator = pda::pump::pool_authority(mint)` and `index = 0` —
+/// the pump migration always uses index 0 against the deterministic
+/// pool-authority PDA.
+fn clone_fixture_mint(
+    rpc: &RpcClient,
+    out: &mut HashMap<Pubkey, Account>,
+    fixture: &FixtureMint,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mint = fixture.mint;
+    println!("📥 Fixture {} ({}):", fixture.label, mint);
+
+    // The mint account itself (Token-2022 program owner for v2 coins).
+    clone_one(rpc, out, "  mint", mint, true)?;
+
+    // Bonding curve always exists; everything else hangs off its `creator`.
+    let bonding_curve_key = pda::pump::bonding_curve(&mint).0;
+    let bc_account = clone_one(rpc, out, "  bonding_curve", bonding_curve_key, true)?
+        .expect("bonding_curve required entry returned None");
+    let bc = decode_bonding_curve(&bc_account.data)?;
+
+    // Per-mint PDAs the program does NOT lazy-init.
+    clone_one(
+        rpc,
+        out,
+        "  creator_vault",
+        pda::pump::creator_vault(&bc.creator).0,
+        false,
+    )?;
+    clone_one(
+        rpc,
+        out,
+        "  sharing_config",
+        pda::pump::sharing_config(&mint).0,
+        false,
+    )?;
+    clone_one(
+        rpc,
+        out,
+        "  bonding_curve_v2",
+        pda::pump::bonding_curve_v2(&mint).0,
+        false,
+    )?;
+    // Bonding curve's base + quote ATAs (Token-2022 base, classic-SPL wSOL quote).
+    clone_one(
+        rpc,
+        out,
+        "  bonding_curve_base_ata",
+        pda::associated_token(
+            &bonding_curve_key,
+            &constants::SPL_TOKEN_2022_PROGRAM_ID,
+            &mint,
+        )
+        .0,
+        false,
+    )?;
+    clone_one(
+        rpc,
+        out,
+        "  bonding_curve_wsol_ata",
+        pda::associated_token(
+            &bonding_curve_key,
+            &constants::SPL_TOKEN_PROGRAM_ID,
+            &constants::NATIVE_MINT,
+        )
+        .0,
+        false,
+    )?;
+
+    // Post-migration AMM pool, only when the curve has graduated. The
+    // pool_authority + index=0 derivation matches what the program emits
+    // on migration; if the snapshot pre-dates migration, the pool will
+    // simply be missing and the AMM tests will be skipped at runtime.
+    if bc.complete {
+        let pool_creator = pda::pump::pool_authority(&mint).0;
+        let pool_key = pda::pump_amm::pool(0, &pool_creator, &mint, &constants::NATIVE_MINT).0;
+        let pool_account = clone_one(rpc, out, "  pool", pool_key, false)?;
+        if let Some(pool_account) = pool_account {
+            let pool = decode_pool(&pool_account.data)?;
+            clone_one(rpc, out, "    lp_mint", pool.lp_mint, true)?;
+            clone_one(
+                rpc,
+                out,
+                "    pool_base_token_account",
+                pool.pool_base_token_account,
+                true,
+            )?;
+            clone_one(
+                rpc,
+                out,
+                "    pool_quote_token_account",
+                pool.pool_quote_token_account,
+                true,
+            )?;
+            // Coin-creator vault authority + its quote ATA (where AMM
+            // creator fees accrue). ATA may not exist yet if no fees have
+            // ever been claimed against this pool.
+            let cc_vault_authority =
+                pda::pump_amm::coin_creator_vault_authority(&pool.coin_creator).0;
+            clone_one(
+                rpc,
+                out,
+                "    coin_creator_vault_authority",
+                cc_vault_authority,
+                false,
+            )?;
+            clone_one(
+                rpc,
+                out,
+                "    coin_creator_vault_quote_ata",
+                pda::associated_token(
+                    &cc_vault_authority,
+                    &constants::SPL_TOKEN_PROGRAM_ID,
+                    &constants::NATIVE_MINT,
+                )
+                .0,
+                false,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = dotenvy::dotenv();
+    let cli = parse_cli().map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
+
+    let network = cli.network.unwrap_or_else(Network::from_env);
+    let rpc_url = cli
+        .rpc_url
+        .or_else(|| std::env::var("PUMP_CLONE_RPC").ok())
+        .unwrap_or_else(|| network.default_rpc().to_string());
+    let rpc = RpcClient::new(rpc_url.clone());
+    println!("🌐 Cloning {network:?} from: {rpc_url}");
+
+    // ---- Phase 1: fetch the fixed program-state PDAs. ----
+    let labeled = fixed_pdas(network);
+    let keys: Vec<Pubkey> = labeled.iter().map(|(_, k, _)| *k).collect();
+    let fetched = rpc.get_multiple_accounts(&keys)?;
+
+    let mut out: HashMap<Pubkey, Account> = HashMap::new();
+    let mut global_account: Option<Account> = None;
+    println!("📥 Fixed PDAs:");
+    for ((label, key, required), maybe_acct) in labeled.iter().zip(fetched.into_iter()) {
+        match maybe_acct {
+            Some(acct) => {
+                print_account(label, key, &acct);
+                if *label == "pump:global" {
+                    global_account = Some(acct.clone());
+                }
+                out.insert(*key, acct);
+            }
+            None if *required => {
+                panic!("required account `{label}` missing on {network:?} at {key}");
+            }
+            None => {
+                println!("  {:<40} {} (not on cluster — skipped)", label, key);
+            }
+        }
+    }
+
+    // ---- Phase 2: extract recipient pubkeys from the cloned Global. ----
+    let global = decode_global(&global_account.expect("pump:global must be set above").data)?;
+    let mut recipients: Vec<Pubkey> = Vec::new();
+    recipients.push(global.fee_recipient);
+    recipients.extend(global.fee_recipients.iter().copied());
+    recipients.push(global.reserved_fee_recipient);
+    recipients.extend(global.reserved_fee_recipients.iter().copied());
+    recipients.extend(global.buyback_fee_recipients.iter().copied());
+    recipients.retain(|p| *p != Pubkey::default());
+    recipients.sort();
+    recipients.dedup();
+    println!(
+        "🔎 Global yielded {} distinct fee/buyback recipient(s)",
+        recipients.len()
+    );
+
+    // ---- Phase 3: fetch each recipient. Preserve owner/data when present
+    //              (some recipients may be PDAs of pump_fees or similar);
+    //              fabricate an empty system account otherwise. ----
+    if !recipients.is_empty() {
+        let recipient_accounts = rpc.get_multiple_accounts(&recipients)?;
+        println!("📥 Recipients:");
+        for (key, maybe_acct) in recipients.iter().zip(recipient_accounts.into_iter()) {
+            let acct = maybe_acct.unwrap_or_else(|| Account {
+                lamports: 0,
+                data: vec![],
+                owner: system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            });
+            print_account("recipient", key, &acct);
+            // Skip if already present (e.g. recipient happens to equal a fixed PDA).
+            out.entry(*key).or_insert(acct);
+        }
+    }
+
+    // ---- Phase 4: per-mint fixtures. For each entry in `FIXTURE_MINTS`,
+    //               clone the mint and every PDA the SDK touches that the
+    //               program does NOT lazy-initialize on first use. ----
+    for fixture in FIXTURE_MINTS {
+        clone_fixture_mint(&rpc, &mut out, fixture)?;
+    }
+
+    // ---- Phase 5: serialize + zstd-compress, write to artifacts/. ----
+    let bytes = bincode::serialize(&out)?;
+    let compressed = zstd::stream::encode_all(&bytes[..], 3)?;
+    if let Some(parent) = std::path::Path::new(OUT_PATH).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(OUT_PATH, &compressed)?;
+    println!(
+        "✅ Wrote {} accounts to {} ({} bytes raw, {} bytes zstd)",
+        out.len(),
+        OUT_PATH,
+        bytes.len(),
+        compressed.len()
+    );
+    Ok(())
+}
