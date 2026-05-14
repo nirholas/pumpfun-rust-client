@@ -12,8 +12,13 @@
 //!   2. `PUMP_CLONE_RPC`
 //!   3. Public Solana cluster RPC for the selected network
 //!
+//! Per-PDA mainnet override: entries in `fixed_pdas` carry a
+//! `fetch_from_mainnet` bool. When set, that PDA is fetched from mainnet even
+//! on a devnet run via a separate `RpcClient`. The mainnet endpoint comes from
+//! `PUMP_CLONE_MAINNET_RPC` (if set) or the public mainnet-beta URL.
+//!
 //! A `.env` in the current directory is loaded when present (`dotenvy`), so
-//! `PUMP_CLONE_RPC` / `PUMP_NETWORK` can live there.
+//! `PUMP_CLONE_RPC` / `PUMP_CLONE_MAINNET_RPC` / `PUMP_NETWORK` can live there.
 //!
 //! Run once before `cargo run --features local-validator --bin local-validator`:
 //!   `cargo run --features local-validator --bin clone_devnet_accounts -- --help`
@@ -171,50 +176,74 @@ fn parse_cli() -> Result<Cli, String> {
     })
 }
 
-/// `(label, address, required)`. Required entries panic if absent on the
-/// chosen cluster. Optional entries are skipped when not initialized
-/// (e.g. signer-only PDAs or program-state that's lazily created).
-fn fixed_pdas(network: Network) -> Vec<(&'static str, Pubkey, bool)> {
+/// `(label, address, required, fetch_from_mainnet)`. Required entries panic
+/// if absent on the chosen cluster; optional entries are skipped when not
+/// initialized (e.g. signer-only PDAs or program-state that's lazily
+/// created). When `fetch_from_mainnet` is `true` the entry is fetched from
+/// mainnet regardless of `--network`; flip back to `false` to revert that
+/// PDA to the selected-network fetch.
+fn fixed_pdas(network: Network) -> Vec<(&'static str, Pubkey, bool, bool)> {
     vec![
-        ("pump:global", pda::pump::global().0, true),
+        ("pump:global", pda::pump::global().0, true, false),
         (
             "pump:event_authority",
             pda::pump::event_authority().0,
             false,
+            false,
         ),
-        ("pump:mint_authority", pda::pump::mint_authority().0, false),
+        (
+            "pump:mint_authority",
+            pda::pump::mint_authority().0,
+            false,
+            false,
+        ),
         (
             "pump:global_volume_accumulator",
             pda::pump::global_volume_accumulator().0,
             true,
+            false,
         ),
-        ("pump:fee_config", pda::pump::fee_config().0, true),
+        ("pump:fee_config", pda::pump::fee_config().0, true, false),
         (
             "pump_amm:global_config",
             pda::pump_amm::global_config().0,
+            false,
             false,
         ),
         (
             "pump_amm:event_authority",
             pda::pump_amm::event_authority().0,
             false,
+            false,
         ),
         (
             "pump_amm:global_volume_accumulator",
             pda::pump_amm::global_volume_accumulator().0,
             false,
+            false,
         ),
-        ("pump_amm:fee_config", pda::pump_amm::fee_config().0, true),
+        (
+            "pump_amm:fee_config",
+            pda::pump_amm::fee_config().0,
+            true,
+            false,
+        ),
         (
             "pump_agent_payments:global_config",
             pda::pump_agent_payments::global_config().0,
             false,
+            false,
         ),
-        ("mayhem:global_params", pda::mayhem::global_params().0, true),
-        ("mayhem:sol_vault", pda::mayhem::sol_vault().0, true),
+        (
+            "mayhem:global_params",
+            pda::mayhem::global_params().0,
+            true,
+            false,
+        ),
+        ("mayhem:sol_vault", pda::mayhem::sol_vault().0, true, false),
         // ALT for the cluster — required so the test's full create_coin
         // versioned tx can compress shared accounts under the 1232-byte limit.
-        (network.alt_label(), network.alt(), true),
+        (network.alt_label(), network.alt(), true, false),
     ]
 }
 
@@ -468,7 +497,8 @@ fn synthesize_test_quote_mint(out: &mut HashMap<Pubkey, Account>) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let cli = parse_cli().map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
+    let cli =
+        parse_cli().map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
 
     let network = cli.network.unwrap_or_else(Network::from_env);
     let rpc_url = cli
@@ -480,26 +510,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- Phase 1: fetch the fixed program-state PDAs. ----
     let labeled = fixed_pdas(network);
-    let keys: Vec<Pubkey> = labeled.iter().map(|(_, k, _)| *k).collect();
-    let fetched = rpc.get_multiple_accounts(&keys)?;
+
+    // Some entries opt into fetching from mainnet regardless of `--network`
+    // via the per-tuple `fetch_from_mainnet` flag. Build a separate mainnet
+    // RPC client only when we have at least one such entry and the selected
+    // cluster isn't already mainnet.
+    let needs_mainnet = labeled.iter().any(|(_, _, _, from_mainnet)| *from_mainnet);
+    let mainnet_rpc: Option<RpcClient> = if needs_mainnet && !matches!(network, Network::Mainnet) {
+        let mainnet_url = std::env::var("PUMP_CLONE_MAINNET_RPC")
+            .unwrap_or_else(|_| Network::Mainnet.default_rpc().to_string());
+        println!("🌐 Mainnet override RPC: {mainnet_url}");
+        Some(RpcClient::new(mainnet_url))
+    } else {
+        None
+    };
+
+    let default_keys: Vec<Pubkey> = labeled
+        .iter()
+        .filter(|(_, _, _, from_mainnet)| !*from_mainnet)
+        .map(|(_, k, _, _)| *k)
+        .collect();
+    let mainnet_keys: Vec<Pubkey> = labeled
+        .iter()
+        .filter(|(_, _, _, from_mainnet)| *from_mainnet)
+        .map(|(_, k, _, _)| *k)
+        .collect();
+
+    let mut by_key: HashMap<Pubkey, Option<Account>> = HashMap::new();
+    if !default_keys.is_empty() {
+        println!(
+            "📡 Fetching {} key(s) from {network:?} ({rpc_url})",
+            default_keys.len()
+        );
+        for (k, a) in default_keys
+            .iter()
+            .copied()
+            .zip(rpc.get_multiple_accounts(&default_keys)?.into_iter())
+        {
+            by_key.insert(k, a);
+        }
+    }
+    if !mainnet_keys.is_empty() {
+        let client = mainnet_rpc.as_ref().unwrap_or(&rpc);
+        println!(
+            "📡 Fetching {} key(s) from mainnet override",
+            mainnet_keys.len()
+        );
+        for (k, a) in mainnet_keys
+            .iter()
+            .copied()
+            .zip(client.get_multiple_accounts(&mainnet_keys)?.into_iter())
+        {
+            by_key.insert(k, a);
+        }
+    }
 
     let mut out: HashMap<Pubkey, Account> = HashMap::new();
     let mut global_account: Option<Account> = None;
     println!("📥 Fixed PDAs:");
-    for ((label, key, required), maybe_acct) in labeled.iter().zip(fetched.into_iter()) {
-        match maybe_acct {
+    for (label, key, required, from_mainnet) in labeled.iter() {
+        let suffix = if *from_mainnet { " (mainnet)" } else { "" };
+        match by_key.remove(key).flatten() {
             Some(acct) => {
-                print_account(label, key, &acct);
+                print_account(&format!("{label}{suffix}"), key, &acct);
                 if *label == "pump:global" {
                     global_account = Some(acct.clone());
                 }
                 out.insert(*key, acct);
             }
             None if *required => {
-                panic!("required account `{label}` missing on {network:?} at {key}");
+                let source = if *from_mainnet {
+                    "mainnet".to_string()
+                } else {
+                    format!("{network:?}")
+                };
+                panic!("required account `{label}` missing on {source} at {key}");
             }
             None => {
-                println!("  {:<40} {} (not on cluster — skipped)", label, key);
+                println!(
+                    "  {:<40} {} (not on cluster — skipped)",
+                    format!("{label}{suffix}"),
+                    key
+                );
             }
         }
     }

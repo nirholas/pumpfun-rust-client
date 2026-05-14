@@ -72,6 +72,9 @@ impl<T: AnchorDeserialize> AnchorDeserialize for AccountWrapper<T> {
     }
 }
 
+#[cfg(feature = "idl-build")]
+impl<T> anchor_lang::IdlBuild for AccountWrapper<T> {}
+
 impl<T> AccountDeserialize for AccountWrapper<T>
 where
     T: AccountDeserialize + AccountSerialize + Default,

@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.86"
 name = "pump-rust-client"
-version = "0.1.5"
+version = "0.1.6"
 build = false
 autolib = false
 autobins = false
@@ -31,6 +31,10 @@ client = [
     "dep:solana-client",
 ]
 default = []
+idl-build = [
+    "anchor-lang/idl-build",
+    "anchor-spl/idl-build",
+]
 local-validator = [
     "client",
     "dep:solana-test-validator",

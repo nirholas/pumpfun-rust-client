@@ -1,6 +1,6 @@
 [package]
 name = "pump-rust-client"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.86"
 # `resolver = "3"` requires Cargo's unstable `edition2024` (rejected by solana-verify / cargo 1.81).
@@ -14,6 +14,7 @@ crate-type = ["lib"]
 
 [features]
 default = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 client = ["dep:solana-sdk", "dep:solana-client"]
 local-validator = [
     "client",
