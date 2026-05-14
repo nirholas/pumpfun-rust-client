@@ -1,9 +1,10 @@
 [package]
 name = "pump-rust-client"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.86"
-resolver = "3"
+# `resolver = "3"` requires Cargo's unstable `edition2024` (rejected by solana-verify / cargo 1.81).
+resolver = "2"
 description = "Rust SDK for the pump and pump_amm Solana programs: instruction builders, quoting, PDA helpers, and optional RPC client features."
 license = "MIT"
 
