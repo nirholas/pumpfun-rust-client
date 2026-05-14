@@ -20,8 +20,10 @@ mod common;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
+use pump_rust_client::accounts::decode_fee_config;
 use pump_rust_client::accounts::pump_amm::{decode_global_config, decode_pool};
 use pump_rust_client::{
     constants, pda, AmmQuoteSource, CreateCoinParams, PumpPoolCtx, PumpSdk, TradeTxParams,
@@ -388,7 +390,7 @@ async fn quote_amm_token_out_simulation_matches() {
     let fee_config_account = rpc.get_account(&pda::pump_amm::fee_config().0).await.ok();
     let amm_fee_config = fee_config_account
         .as_ref()
-        .and_then(|acct| pump_rust_client::accounts::pump_amm::decode_fee_config(&acct.data).ok());
+        .and_then(|acct| decode_fee_config(&acct.data).ok());
 
     // Live reserves come straight from the pool's token accounts.
     let base_reserve = token_balance(&rpc, &pool.pool_base_token_account).await;
@@ -528,9 +530,10 @@ async fn run_create_coin_then_trade_tx_sell(
             uri: "https://example.com/txt.json".into(),
             mayhem_mode,
             cashback,
+            quote_mint: Pubkey::default(),
             global: &global,
             token_amount,
-            max_sol_cost,
+            max_quote_tokens: max_sol_cost,
             tokenized_agent_buyback_bps,
         })
         .expect("create_coin_instructions");

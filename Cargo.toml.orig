@@ -1,6 +1,6 @@
 [package]
 name = "pump-rust-client"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.86"
 # `resolver = "3"` requires Cargo's unstable `edition2024` (rejected by solana-verify / cargo 1.81).
@@ -94,6 +94,11 @@ required-features = ["local-validator"]
 [[example]]
 name = "sell_amm"
 path = "examples/sell_amm.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "claim_cashback_v2"
+path = "examples/claim_cashback_v2.rs"
 required-features = ["local-validator"]
 
 [dev-dependencies]

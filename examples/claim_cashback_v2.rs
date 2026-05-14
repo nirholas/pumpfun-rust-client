@@ -21,18 +21,18 @@ async fn main() {
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
     let global = client.fetch_global().await.expect("fetch_global");
 
-    let mut ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
-    ixs.extend(
+    let mut create_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
+    create_ixs.extend(
         sdk.create_v2_and_buy_instruction(
             mint.pubkey(),
             user.pubkey(),
-            "Example",
-            "EX",
-            "https://example.com/ex.json",
+            "Cashback Example",
+            "CBEX",
+            "https://example.com/cbex.json",
             user.pubkey(),
             Pubkey::default(),
             false,
-            false,
+            true,
             None,
             &global,
             1_000_000_000,
@@ -40,6 +40,16 @@ async fn main() {
         )
         .expect("create_v2_and_buy_instruction"),
     );
-    let sig = send_v0_tx(&rpc, &ixs, &user, &[&user, &mint], &alt).await;
-    println!("create_v2_and_buy sig: {sig}");
+    send_v0_tx(&rpc, &create_ixs, &user, &[&user, &mint], &alt).await;
+
+    let claim_ixs = vec![
+        ComputeBudgetInstruction::set_compute_unit_limit(200_000),
+        sdk.claim_cashback_v2_instruction(
+            user.pubkey(),
+            Pubkey::default(),
+            constants::SPL_TOKEN_PROGRAM_ID,
+        ),
+    ];
+    let sig = send_v0_tx(&rpc, &claim_ixs, &user, &[&user], &alt).await;
+    println!("claim_cashback_v2 sig: {sig}");
 }

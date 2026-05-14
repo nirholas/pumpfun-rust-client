@@ -156,8 +156,8 @@ The bonding-curve `*_instructions` plural builders take a fetched
 [`Global`](src/state.rs) and [`BondingCurve`](src/state.rs) so the SDK can
 pick the correct fee recipients and quote layout.
 `create_v2_and_buy_instruction` synthesises a bonding-curve preview
-internally (wSOL quote), so a fetch is not required before the curve
-exists.
+internally from the supplied `quote_mint` (`Pubkey::default()` → wSOL),
+so a fetch is not required before the curve exists.
 
 ## Building, signing, and sending — `AsyncPumpClient`
 

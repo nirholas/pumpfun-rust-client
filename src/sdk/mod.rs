@@ -8,7 +8,7 @@ use crate::math::utils::{add_slippage, sub_slippage};
 pub use crate::math::QuoteError;
 use crate::math::QuoteResult;
 use crate::pda;
-use crate::state::pump_amm::{FeeConfig as AmmFeeConfig, GlobalConfig, Pool};
+use crate::state::pump_amm::{GlobalConfig, Pool};
 use crate::state::{BondingCurve, FeeConfig, Global};
 
 mod pump_amm_ix;
@@ -99,7 +99,7 @@ pub struct TradeTxParams<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct PumpPoolQuoteCtx<'a> {
     pub amm_global: &'a GlobalConfig,
-    pub amm_fee_config: Option<&'a AmmFeeConfig>,
+    pub amm_fee_config: Option<&'a FeeConfig>,
     pub pool_state: &'a Pool,
     pub base_reserve: u64,
     pub quote_reserve: u64,
@@ -119,7 +119,8 @@ pub struct TradeQuoteParams<'a> {
     pub pump_pool: Option<PumpPoolQuoteCtx<'a>>,
 }
 
-/// [`PumpSdk::create_coin_instructions`]. New mint keypair must co-sign. Initial buy is wSOL-quoted.
+/// [`PumpSdk::create_coin_instructions`]. New mint keypair must co-sign. The
+/// initial buy is in the chosen `quote_mint` (`Pubkey::default()` → wSOL).
 ///
 /// `tokenized_agent_buyback_bps`: when `Some(bps)`, an `agent_initialize`
 /// instruction (pump_agent_payments) is appended that registers `creator` as
@@ -135,9 +136,10 @@ pub struct CreateCoinParams<'a> {
     pub uri: String,
     pub mayhem_mode: bool,
     pub cashback: bool,
+    pub quote_mint: Pubkey,
     pub global: &'a Global,
     pub token_amount: u64,
-    pub max_sol_cost: u64,
+    pub max_quote_tokens: u64,
     pub tokenized_agent_buyback_bps: Option<u16>,
 }
 
@@ -206,10 +208,7 @@ impl PumpSdk {
     }
 
     /// `(fee_recipient, buyback_fee_recipient)` from `Global`. `None` when either pool is empty.
-    pub fn pump_fee_recipients_pair(
-        global: &Global,
-        is_mayhem: bool,
-    ) -> Option<(Pubkey, Pubkey)> {
+    pub fn pump_fee_recipients_pair(global: &Global, is_mayhem: bool) -> Option<(Pubkey, Pubkey)> {
         Some((
             Self::fee_recipient_from_pump_global(global, is_mayhem)?,
             Self::buyback_fee_recipient_from_pump_global(global)?,
@@ -238,7 +237,7 @@ impl PumpSdk {
 
     fn map_amm_quote_source<R>(
         global_config: &GlobalConfig,
-        fee_config: Option<&AmmFeeConfig>,
+        fee_config: Option<&FeeConfig>,
         source: AmmQuoteSource<'_>,
         with: impl FnOnce(AmmContext<'_>) -> QuoteResult<R>,
     ) -> QuoteResult<R> {
@@ -363,7 +362,7 @@ impl PumpSdk {
     pub fn buy_quote_amm_sol_in(
         &self,
         global_config: &GlobalConfig,
-        fee_config: Option<&AmmFeeConfig>,
+        fee_config: Option<&FeeConfig>,
         source: AmmQuoteSource<'_>,
         sol_amount: u64,
         slippage_bps: u16,
@@ -385,7 +384,7 @@ impl PumpSdk {
     pub fn buy_quote_amm_token_out(
         &self,
         global_config: &GlobalConfig,
-        fee_config: Option<&AmmFeeConfig>,
+        fee_config: Option<&FeeConfig>,
         source: AmmQuoteSource<'_>,
         token_amount: u64,
         slippage_bps: u16,
@@ -406,7 +405,7 @@ impl PumpSdk {
     pub fn sell_quote_amm(
         &self,
         global_config: &GlobalConfig,
-        fee_config: Option<&AmmFeeConfig>,
+        fee_config: Option<&FeeConfig>,
         source: AmmQuoteSource<'_>,
         token_amount: u64,
         slippage_bps: u16,
@@ -453,8 +452,8 @@ mod tests {
     use crate::pump::client;
     use crate::pump_agent_payments::client as agent_client;
     use crate::pump_amm::client as amm_client;
-    use crate::state::pump_amm::{GlobalConfig, Pool};
-    use crate::state::{BondingCurve, Global};
+    use crate::state::pump_amm::{GlobalConfig, GlobalConfigFromIdl, Pool, PoolFromIdl};
+    use crate::state::{BondingCurve, BondingCurveFromIdl, Global, GlobalFromIdl};
 
     fn fake_pubkey(seed: u8) -> Pubkey {
         Pubkey::new_from_array([seed; 32])
@@ -580,8 +579,12 @@ mod tests {
         assert!(!quote_meta.is_signer);
 
         let bonding_curve = pda::pump::bonding_curve(&mint).0;
-        let expected_ata =
-            pda::associated_token(&bonding_curve, &constants::SPL_TOKEN_PROGRAM_ID, &quote_mint).0;
+        let expected_ata = pda::associated_token(
+            &bonding_curve,
+            &constants::SPL_TOKEN_PROGRAM_ID,
+            &quote_mint,
+        )
+        .0;
         assert_eq!(ata_meta.pubkey, expected_ata);
         assert!(ata_meta.is_writable);
         assert!(!ata_meta.is_signer);
@@ -703,6 +706,7 @@ mod tests {
                 "TST",
                 "https://example.com/metadata.json",
                 creator,
+                Pubkey::default(),
                 false,
                 false,
                 None,
@@ -744,11 +748,11 @@ mod tests {
         let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator,
             quote_mint,
             ..Default::default()
-        };
+        });
 
         let ix = sdk
             .buy_v2_instruction(
@@ -808,11 +812,11 @@ mod tests {
         let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator,
             quote_mint,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .buy_v2_instructions(
@@ -941,11 +945,11 @@ mod tests {
         let buyback_fee_recipient = fake_pubkey(116);
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator,
             quote_mint,
             ..Default::default()
-        };
+        });
 
         let ix = sdk
             .sell_v2_instruction(
@@ -1007,11 +1011,11 @@ mod tests {
         let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator,
             quote_mint,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .sell_v2_instructions(
@@ -1078,13 +1082,13 @@ mod tests {
         let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let amm_global = amm_global_with_fees(fee_rec, buyback);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint,
             quote_mint,
             coin_creator,
             is_cashback_coin: true,
             ..Default::default()
-        };
+        });
 
         let ix = sdk
             .buy_amm_instruction(
@@ -1156,13 +1160,13 @@ mod tests {
         let sdk = PumpSdk::new();
         let (pool, base_mint, quote_mint, user, _, fee_rec, buyback, _) = fake_amm_inputs();
         let amm_global = amm_global_with_fees(fee_rec, buyback);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint,
             quote_mint,
             coin_creator: Pubkey::default(),
             is_cashback_coin: false,
             ..Default::default()
-        };
+        });
 
         let ix = sdk
             .buy_amm_instruction(
@@ -1191,13 +1195,13 @@ mod tests {
         let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let amm_global = amm_global_with_fees(fee_rec, buyback);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint,
             quote_mint,
             coin_creator,
             is_cashback_coin: true,
             ..Default::default()
-        };
+        });
 
         let ix = sdk
             .sell_amm_instruction(
@@ -1257,13 +1261,13 @@ mod tests {
         let sdk = PumpSdk::new();
         let (pool, base_mint, quote_mint, user, _, fee_rec, buyback, _) = fake_amm_inputs();
         let amm_global = amm_global_with_fees(fee_rec, buyback);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint,
             quote_mint,
             coin_creator: Pubkey::default(),
             is_cashback_coin: false,
             ..Default::default()
-        };
+        });
 
         let ix = sdk
             .sell_amm_instruction(
@@ -1290,13 +1294,13 @@ mod tests {
         let (pool, base_mint, quote_mint, user, coin_creator, fee_rec, buyback, _) =
             fake_amm_inputs();
         let amm_global = amm_global_with_fees(fee_rec, buyback);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint,
             quote_mint,
             coin_creator,
             is_cashback_coin: false,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .buy_amm_instructions(
@@ -1327,13 +1331,13 @@ mod tests {
         let (pool, base_mint, quote_mint, user, coin_creator, fee_rec, buyback, _) =
             fake_amm_inputs();
         let amm_global = amm_global_with_fees(fee_rec, buyback);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint,
             quote_mint,
             coin_creator,
             is_cashback_coin: false,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .sell_amm_instructions(
@@ -1385,11 +1389,11 @@ mod tests {
         let buyback_fee_recipient = fake_pubkey(0xB5);
         let max_sol = 7_500_000u64;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator,
             quote_mint: constants::NATIVE_MINT,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .trade_tx_instructions_with_venue(TradeTxWithVenueParams {
@@ -1437,11 +1441,11 @@ mod tests {
         let fee_recipient = fake_pubkey(0xC4);
         let buyback_fee_recipient = fake_pubkey(0xC5);
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator,
             quote_mint: constants::NATIVE_MINT,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .trade_tx_instructions_with_venue(TradeTxWithVenueParams {
@@ -1481,12 +1485,12 @@ mod tests {
         let buyback_fee_recipient = fake_pubkey(0x74);
         let max_sol = 7_500_000u64;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator,
             quote_mint: constants::NATIVE_MINT,
             complete: false,
             ..Default::default()
-        };
+        });
 
         let explicit = sdk
             .trade_tx_instructions_with_venue(TradeTxWithVenueParams {
@@ -1506,11 +1510,11 @@ mod tests {
 
         let pool = fake_pubkey(0x75);
         let amm_g = amm_global_with_fees(fake_pubkey(0x76), fake_pubkey(0x77));
-        let ps = Pool {
+        let ps = Pool::new(PoolFromIdl {
             base_mint: mint,
             quote_mint: constants::NATIVE_MINT,
             ..Default::default()
-        };
+        });
         let auto = sdk
             .trade_tx_instructions(TradeTxParams {
                 mint,
@@ -1541,12 +1545,12 @@ mod tests {
     fn trade_tx_auto_returns_none_when_complete_without_graduated() {
         let sdk = PumpSdk::new();
         let global = pump_global_with_fees(fake_pubkey(0x80), fake_pubkey(0x81));
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             complete: true,
             ..Default::default()
-        };
-        assert!(
-            sdk.trade_tx_instructions(TradeTxParams {
+        });
+        assert!(sdk
+            .trade_tx_instructions(TradeTxParams {
                 mint: fake_pubkey(0x82),
                 base_token_program: constants::SPL_TOKEN_2022_PROGRAM_ID,
                 quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
@@ -1558,8 +1562,7 @@ mod tests {
                 bonding_curve: &bonding_curve,
                 pump_pool: None,
             })
-            .is_none()
-        );
+            .is_none());
     }
 
     #[test]
@@ -1573,20 +1576,20 @@ mod tests {
         let pool = fake_pubkey(0x95);
         let max_sol = 2_500_000u64;
         let amm_global = amm_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint: mint,
             quote_mint: constants::NATIVE_MINT,
             coin_creator,
             is_cashback_coin: true,
             ..Default::default()
-        };
+        });
         let pump_global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let bonding_curve = BondingCurve {
+        let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
             creator: coin_creator,
             quote_mint: constants::NATIVE_MINT,
             complete: true,
             ..Default::default()
-        };
+        });
 
         let explicit = sdk
             .trade_tx_instructions_with_venue(TradeTxWithVenueParams {
@@ -1784,13 +1787,13 @@ mod tests {
         let pool = fake_pubkey(0xD6);
         let max_sol = 2_500_000u64;
         let amm_global = amm_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint: mint,
             quote_mint: constants::NATIVE_MINT,
             coin_creator,
             is_cashback_coin: true,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .trade_tx_instructions_with_venue(TradeTxWithVenueParams {
@@ -1844,13 +1847,13 @@ mod tests {
         let buyback_fee_recipient = fake_pubkey(0xE5);
         let pool = fake_pubkey(0xE6);
         let amm_global = amm_global_with_fees(fee_recipient, buyback_fee_recipient);
-        let pool_state = Pool {
+        let pool_state = Pool::new(PoolFromIdl {
             base_mint: mint,
             quote_mint: constants::NATIVE_MINT,
             coin_creator,
             is_cashback_coin: false,
             ..Default::default()
-        };
+        });
 
         let ixs = sdk
             .trade_tx_instructions_with_venue(TradeTxWithVenueParams {
@@ -1903,9 +1906,10 @@ mod tests {
                 uri: "https://example.com/metadata.json".into(),
                 mayhem_mode: false,
                 cashback: false,
+                quote_mint: Pubkey::default(),
                 global: &global,
                 token_amount: 1_000,
-                max_sol_cost: max_sol,
+                max_quote_tokens: max_sol,
                 tokenized_agent_buyback_bps: None,
             })
             .expect("create_coin_instructions");
@@ -1951,9 +1955,10 @@ mod tests {
                 uri: "https://example.com/metadata.json".into(),
                 mayhem_mode: false,
                 cashback: false,
+                quote_mint: Pubkey::default(),
                 global: &global,
                 token_amount: 1_000,
-                max_sol_cost: 500_000,
+                max_quote_tokens: 500_000,
                 tokenized_agent_buyback_bps: Some(buyback_bps),
             })
             .expect("create_coin_instructions Some");
@@ -1967,9 +1972,10 @@ mod tests {
                 uri: "https://example.com/metadata.json".into(),
                 mayhem_mode: false,
                 cashback: false,
+                quote_mint: Pubkey::default(),
                 global: &global,
                 token_amount: 1_000,
-                max_sol_cost: 500_000,
+                max_quote_tokens: 500_000,
                 tokenized_agent_buyback_bps: None,
             })
             .expect("create_coin_instructions None");
@@ -2015,18 +2021,18 @@ mod tests {
     }
 
     fn fixture_global() -> Global {
-        Global {
+        Global::new(GlobalFromIdl {
             fee_basis_points: 100,
             creator_fee_basis_points: 50,
             token_total_supply: 1_000_000_000_000_000,
             initial_real_token_reserves: 793_100_000_000_000,
             pool_migration_fee: 6_900_000_000,
             ..Default::default()
-        }
+        })
     }
 
     fn fixture_bonding_curve(creator: Pubkey) -> BondingCurve {
-        BondingCurve {
+        BondingCurve::new(BondingCurveFromIdl {
             virtual_token_reserves: 1_073_000_000_000_000,
             virtual_quote_reserves: 30_000_000_000,
             real_token_reserves: 793_100_000_000_000,
@@ -2037,26 +2043,26 @@ mod tests {
             is_mayhem_mode: false,
             is_cashback_coin: false,
             quote_mint: constants::NATIVE_MINT,
-        }
+        })
     }
 
     fn fixture_amm_global_config() -> GlobalConfig {
-        GlobalConfig {
+        GlobalConfig::new(GlobalConfigFromIdl {
             lp_fee_basis_points: 20,
             protocol_fee_basis_points: 5,
             coin_creator_fee_basis_points: 5,
             ..Default::default()
-        }
+        })
     }
 
     fn fixture_pool(coin_creator: Pubkey) -> Pool {
-        Pool {
+        Pool::new(PoolFromIdl {
             base_mint: fake_pubkey(0xAA),
             creator: fake_pubkey(0xBB),
             coin_creator,
             quote_mint: constants::NATIVE_MINT,
             ..Default::default()
-        }
+        })
     }
 
     #[test]

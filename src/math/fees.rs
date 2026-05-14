@@ -3,10 +3,9 @@
 use solana_program::pubkey::Pubkey;
 
 use crate::pda;
-use crate::pump::types::{FeeTier as PumpFeeTier, Fees as PumpFees};
-use crate::pump_amm::types::{FeeTier as AmmFeeTier, Fees as AmmFees};
-use crate::state::pump_amm::{FeeConfig as AmmFeeConfig, GlobalConfig};
-use crate::state::{FeeConfig as PumpFeeConfig, Global};
+use crate::pump::types::{FeeTier, Fees};
+use crate::state::pump_amm::GlobalConfig;
+use crate::state::{FeeConfig, Global};
 
 /// `ceil(a / b)` for non-zero `b`.
 #[inline]
@@ -75,7 +74,7 @@ pub struct AmmFeeBps {
 }
 
 /// Highest tier with threshold `<= market_cap`, else first tier.
-fn calculate_pump_fee_tier(tiers: &[PumpFeeTier], market_cap: u128) -> &PumpFees {
+fn calculate_pump_fee_tier(tiers: &[FeeTier], market_cap: u128) -> &Fees {
     let first = &tiers[0].fees;
     if market_cap < tiers[0].market_cap_lamports_threshold {
         return first;
@@ -88,7 +87,7 @@ fn calculate_pump_fee_tier(tiers: &[PumpFeeTier], market_cap: u128) -> &PumpFees
     first
 }
 
-fn calculate_amm_fee_tier(tiers: &[AmmFeeTier], market_cap: u128) -> &AmmFees {
+fn calculate_amm_fee_tier(tiers: &[FeeTier], market_cap: u128) -> &Fees {
     let first = &tiers[0].fees;
     if market_cap < tiers[0].market_cap_lamports_threshold {
         return first;
@@ -106,7 +105,7 @@ fn calculate_amm_fee_tier(tiers: &[AmmFeeTier], market_cap: u128) -> &AmmFees {
 /// fees indexed by current market cap.
 pub fn compute_bonding_curve_fee_bps(
     global: &Global,
-    fee_config: Option<&PumpFeeConfig>,
+    fee_config: Option<&FeeConfig>,
     mint_supply: u64,
     virtual_quote_reserves: u64,
     virtual_token_reserves: u64,
@@ -130,7 +129,7 @@ pub fn compute_bonding_curve_fee_bps(
 /// AMM trade fee bps: tiered for pump pools, `flat_fees` for others, else globals.
 pub fn compute_amm_fee_bps(
     global_config: &GlobalConfig,
-    fee_config: Option<&AmmFeeConfig>,
+    fee_config: Option<&FeeConfig>,
     base_mint: &Pubkey,
     pool_creator: &Pubkey,
     base_mint_supply: u64,

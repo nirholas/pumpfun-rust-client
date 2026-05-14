@@ -5,7 +5,7 @@ use solana_program::{
     system_program,
 };
 
-use crate::state::{BondingCurve, Global};
+use crate::state::{BondingCurve, BondingCurveFromIdl, Global};
 use crate::token::create_associated_token_account_idempotent;
 use crate::{
     constants, pda, pump::client, pump::types::OptionBool,
@@ -161,7 +161,7 @@ impl PumpSdk {
         quote_token_program: Pubkey,
         user: Pubkey,
         amount: u64,
-        max_sol_cost: u64,
+        max_quote_tokens: u64,
     ) -> Option<Instruction> {
         let (fee_recipient, buyback_fee_recipient) =
             Self::pump_fee_recipients_pair(global, bonding_curve.is_mayhem_mode)?;
@@ -174,7 +174,7 @@ impl PumpSdk {
             fee_recipient,
             buyback_fee_recipient,
             amount,
-            max_sol_cost,
+            max_quote_tokens,
         ))
     }
 
@@ -248,7 +248,7 @@ impl PumpSdk {
         quote_token_program: Pubkey,
         user: Pubkey,
         amount: u64,
-        max_sol_cost: u64,
+        max_quote_tokens: u64,
     ) -> Option<Vec<Instruction>> {
         let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let (fee_recipient, buyback_fee_recipient) =
@@ -272,7 +272,7 @@ impl PumpSdk {
             fee_recipient,
             buyback_fee_recipient,
             amount,
-            max_sol_cost,
+            max_quote_tokens,
         ));
         Some(instructions)
     }
@@ -525,7 +525,9 @@ impl PumpSdk {
         Some(instructions)
     }
 
-    /// `create_v2` then [`Self::buy_v2_instructions`] (wSOL quote at create).
+    /// `create_v2` then [`Self::buy_v2_instructions`]. Pass
+    /// `quote_mint = Pubkey::default()` for a wSOL-quoted coin, or a
+    /// supported quote mint (e.g. USDC) for a non-native quote.
     /// Pass `tokenized_agent_buyback_bps = Some(bps)` to also append
     /// [`Self::agent_initialize_instruction`] in the same tx (mirrors the
     /// frontend's tokenized-agent flow).
@@ -537,21 +539,27 @@ impl PumpSdk {
         symbol: impl Into<String>,
         uri: impl Into<String>,
         creator: Pubkey,
+        quote_mint: Pubkey,
         mayhem_mode: bool,
         cashback: bool,
         tokenized_agent_buyback_bps: Option<u16>,
         global: &Global,
         amount: u64,
-        max_sol_cost: u64,
+        max_quote_tokens: u64,
     ) -> Option<Vec<Instruction>> {
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
-        let bonding_curve_preview = BondingCurve {
+        let resolved_quote_mint = if quote_mint == Pubkey::default() {
+            constants::NATIVE_MINT
+        } else {
+            quote_mint
+        };
+        let bonding_curve_preview = BondingCurve::new(BondingCurveFromIdl {
             creator,
             is_cashback_coin: cashback,
             is_mayhem_mode: mayhem_mode,
-            quote_mint: constants::NATIVE_MINT,
+            quote_mint: resolved_quote_mint,
             ..Default::default()
-        };
+        });
         let buy_v2_instructions = self.buy_v2_instructions(
             global,
             &bonding_curve_preview,
@@ -559,7 +567,7 @@ impl PumpSdk {
             quote_token_program,
             user,
             amount,
-            max_sol_cost,
+            max_quote_tokens,
         )?;
         let mut instructions = vec![self.create_v2_instruction(
             mint,
@@ -568,7 +576,7 @@ impl PumpSdk {
             symbol,
             uri,
             creator,
-            Pubkey::default(),
+            quote_mint,
             mayhem_mode,
             cashback,
         )];
@@ -629,7 +637,52 @@ impl PumpSdk {
         }
     }
 
-    /// `create_v2` then [`Self::buy_v2_instructions`] (wSOL quote at create).
+    /// `claim_cashback_v2`. Pulls accumulated cashback for `user` to either
+    /// the user's lamport balance (legacy wSOL curves) or to their quote ATA
+    /// (non-SOL curves). Pass `quote_mint = Pubkey::default()` or
+    /// [`constants::NATIVE_MINT`] for the legacy/wSOL claim path.
+    pub fn claim_cashback_v2_instruction(
+        &self,
+        user: Pubkey,
+        quote_mint: Pubkey,
+        quote_token_program: Pubkey,
+    ) -> Instruction {
+        let resolved_quote_mint = if quote_mint == Pubkey::default() {
+            constants::NATIVE_MINT
+        } else {
+            quote_mint
+        };
+        let user_volume_accumulator = pda::pump::user_volume_accumulator(&user).0;
+        let associated_user_volume_accumulator = pda::associated_token(
+            &user_volume_accumulator,
+            &quote_token_program,
+            &resolved_quote_mint,
+        )
+        .0;
+        let associated_quote_user =
+            pda::associated_token(&user, &quote_token_program, &resolved_quote_mint).0;
+        let accounts = client::accounts::ClaimCashbackV2 {
+            user,
+            user_volume_accumulator,
+            quote_mint: resolved_quote_mint,
+            quote_token_program,
+            associated_token_program: constants::SPL_ATA_PROGRAM_ID,
+            associated_user_volume_accumulator,
+            associated_quote_user,
+            system_program: system_program::ID,
+            event_authority: pda::pump::event_authority().0,
+            program: crate::pump::ID,
+        };
+        Instruction {
+            program_id: crate::pump::ID,
+            accounts: accounts.to_account_metas(None),
+            data: client::args::ClaimCashbackV2.data(),
+        }
+    }
+
+    /// `create_v2` then [`Self::buy_v2_instructions`]. Set
+    /// `params.quote_mint = Pubkey::default()` for a wSOL-quoted coin, or a
+    /// supported quote mint (e.g. USDC) for a non-native quote.
     /// Setting `params.tokenized_agent_buyback_bps = Some(bps)` also appends
     /// [`Self::agent_initialize_instruction`].
     pub fn create_coin_instructions(
@@ -645,19 +698,25 @@ impl PumpSdk {
             uri,
             mayhem_mode,
             cashback,
+            quote_mint,
             global,
             token_amount,
-            max_sol_cost,
+            max_quote_tokens,
             tokenized_agent_buyback_bps,
         } = params;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
-        let bonding_curve_preview = BondingCurve {
+        let resolved_quote_mint = if quote_mint == Pubkey::default() {
+            constants::NATIVE_MINT
+        } else {
+            quote_mint
+        };
+        let bonding_curve_preview = BondingCurve::new(BondingCurveFromIdl {
             creator,
             is_cashback_coin: cashback,
             is_mayhem_mode: mayhem_mode,
-            quote_mint: constants::NATIVE_MINT,
+            quote_mint: resolved_quote_mint,
             ..Default::default()
-        };
+        });
 
         let mut ixs: Vec<Instruction> = vec![self.create_v2_instruction(
             mint,
@@ -666,7 +725,7 @@ impl PumpSdk {
             symbol,
             uri,
             creator,
-            Pubkey::default(),
+            quote_mint,
             mayhem_mode,
             cashback,
         )];
@@ -677,7 +736,7 @@ impl PumpSdk {
             quote_token_program,
             user,
             token_amount,
-            max_sol_cost,
+            max_quote_tokens,
         )?);
         if let Some(buyback_bps) = tokenized_agent_buyback_bps {
             ixs.push(self.agent_initialize_instruction(mint, user, creator, buyback_bps));

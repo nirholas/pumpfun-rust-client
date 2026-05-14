@@ -6,7 +6,8 @@ use crate::math::bonding_curve::TOKEN_SUPPLY;
 use crate::math::fees::{ceil_div, compute_amm_fee_bps, creator_fee_amount, fee_amount, AmmFeeBps};
 use crate::math::utils::{mul_div_u128, slippage_bounds};
 use crate::math::{QuoteError, QuoteResult};
-use crate::state::pump_amm::{FeeConfig, GlobalConfig};
+use crate::state::FeeConfig;
+use crate::state::pump_amm::{ GlobalConfig};
 
 pub struct BuyQuoteInputResult {
     pub base_amount_out: u64,
