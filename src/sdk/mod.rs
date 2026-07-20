@@ -44,8 +44,16 @@ pub enum TradeVenue<'a> {
 pub enum AmmQuoteSource<'a> {
     Pool {
         pool: &'a Pool,
+        /// Raw `pool_base_token_account.amount`. Unchanged by the virtual
+        /// quote reserves work: the base side is always the raw vault balance.
         base_reserve: u64,
+        /// Raw `pool_quote_token_account.amount`. NOT the effective reserve:
+        /// supply `virtual_quote_reserves` separately and the math adds them.
         quote_reserve: u64,
+        /// `pool.virtual_quote_reserves`. Read it off the decoded [`Pool`]
+        /// rather than hardcoding `0`: boost pools carry a non-zero value
+        /// and pricing off the raw vault balance misprices them silently.
+        virtual_quote_reserves: i128,
         base_mint_supply: u64,
     },
     BondingCurveComplete {
@@ -101,8 +109,13 @@ pub struct PumpPoolQuoteCtx<'a> {
     pub amm_global: &'a GlobalConfig,
     pub amm_fee_config: Option<&'a FeeConfig>,
     pub pool_state: &'a Pool,
+    /// Raw `pool_base_token_account.amount`.
     pub base_reserve: u64,
+    /// Raw `pool_quote_token_account.amount`, never pre-summed with
+    /// `virtual_quote_reserves`.
     pub quote_reserve: u64,
+    /// `pool_state.virtual_quote_reserves`.
+    pub virtual_quote_reserves: i128,
 }
 
 /// [`PumpSdk::quote_trade`] parameters: routes from [`BondingCurve::complete`], mirroring
@@ -246,6 +259,7 @@ impl PumpSdk {
                 pool,
                 base_reserve,
                 quote_reserve,
+                virtual_quote_reserves,
                 base_mint_supply,
             } => {
                 let ctx = AmmContext {
@@ -256,6 +270,7 @@ impl PumpSdk {
                     coin_creator: &pool.coin_creator,
                     base_reserve,
                     quote_reserve,
+                    virtual_quote_reserves,
                     base_mint_supply,
                 };
                 with(ctx)
@@ -276,6 +291,16 @@ impl PumpSdk {
                     coin_creator: &bonding_curve.creator,
                     base_reserve,
                     quote_reserve,
+                    // This branch estimates reserves from a completed curve
+                    // whose AMM pool has not been read (and may not exist
+                    // yet), so there is no `Pool::virtual_quote_reserves` to
+                    // read. Zero is the correct value here rather than a
+                    // silent default: the migrated pool is seeded from the
+                    // curve's real quote reserves, and any virtual component
+                    // is applied by a later `init_boost`. Once the pool
+                    // account exists, quote through `AmmQuoteSource::Pool`,
+                    // which carries the real field.
+                    virtual_quote_reserves: 0,
                     base_mint_supply,
                 };
                 with(ctx)
@@ -1699,6 +1724,7 @@ mod tests {
             pool: &pool_state,
             base_reserve,
             quote_reserve,
+            virtual_quote_reserves: 0,
             base_mint_supply,
         };
         let buy_direct = sdk
@@ -1719,6 +1745,7 @@ mod tests {
                     pool_state: &pool_state,
                     base_reserve,
                     quote_reserve,
+                    virtual_quote_reserves: 0,
                 }),
             })
             .expect("auto routed")
@@ -1729,6 +1756,7 @@ mod tests {
             pool: &pool_state,
             base_reserve,
             quote_reserve,
+            virtual_quote_reserves: 0,
             base_mint_supply,
         };
         let sell_direct = sdk
@@ -1749,6 +1777,7 @@ mod tests {
                     pool_state: &pool_state,
                     base_reserve,
                     quote_reserve,
+                    virtual_quote_reserves: 0,
                 }),
             })
             .expect("auto routed")
@@ -2150,6 +2179,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000,
@@ -2174,6 +2204,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000_000,
@@ -2197,6 +2228,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000_000,
@@ -2220,6 +2252,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000_000,
@@ -2269,6 +2302,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 0,
                     quote_reserve: 1_000,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000,
                 },
                 1,
@@ -2284,6 +2318,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 1_000,
                     quote_reserve: 0,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000,
                 },
                 1,
@@ -2306,6 +2341,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 1_000,
                     quote_reserve: 1_000,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000,
                 },
                 1_000,
@@ -2321,6 +2357,7 @@ mod tests {
                     pool: &pool,
                     base_reserve: 1_000,
                     quote_reserve: 1_000,
+                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000,
                 },
                 5_000,
@@ -2408,6 +2445,7 @@ mod tests {
             coin_creator: &bc.creator,
             base_reserve,
             quote_reserve,
+            virtual_quote_reserves: 0,
             base_mint_supply: g.token_total_supply,
         };
         let expected = amm_math::buy_quote_input(&ctx, 1_000_000_000)

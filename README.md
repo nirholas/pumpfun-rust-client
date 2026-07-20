@@ -115,6 +115,94 @@ let quote = sdk.quote_trade(TradeQuoteParams {
 | `sell_quote_amm` | `src/sdk/mod.rs` | AMM sell |
 | `quote_trade` | `src/sdk/trade_tx.rs` | Auto-routed via `bonding_curve.complete` |
 
+## AMM pricing: `virtual_quote_reserves`
+
+The PumpSwap `Pool` account carries a `virtual_quote_reserves` field. Every
+AMM quote, spot price, price-impact figure, and market cap prices against the
+**effective** quote reserve:
+
+```text
+effective_quote_reserve = pool_quote_token_account.amount + pool.virtual_quote_reserves
+```
+
+The base side is unchanged: base reserves are still the raw
+`pool_base_token_account.amount`.
+
+Boost pools carry a non-zero value from 2026-07-20. Non-boost pools, and every
+pool written before the field shipped, carry `0`, where `effective == raw` and
+quotes are byte-identical to earlier releases.
+`AccountWrapper` zero-pads short buffers, so a pool account that predates the
+field decodes as `0` rather than failing.
+
+**Pass the raw balance and the virtual figure separately.** The math sums them
+internally. Pre-summing double-counts:
+
+```rust
+use pump_rust_client::{AmmQuoteSource, PumpSdk};
+
+let quote = sdk.sell_quote_amm(
+    &global_config,
+    Some(&fee_config),
+    AmmQuoteSource::Pool {
+        pool: &pool,
+        base_reserve,                                       // raw base vault balance
+        quote_reserve,                                      // RAW quote vault balance
+        virtual_quote_reserves: pool.virtual_quote_reserves, // added internally
+        base_mint_supply,
+    },
+    token_amount,
+    100,
+)?;
+```
+
+```rust
+// WRONG: double-counts the virtual figure.
+quote_reserve: quote_reserve + pool.virtual_quote_reserves as u64,
+virtual_quote_reserves: pool.virtual_quote_reserves,
+
+// WRONG: prices a boost pool off the raw vault balance.
+virtual_quote_reserves: 0,
+```
+
+`AmmQuoteSource::Pool` and `PumpPoolQuoteCtx` both require the field, so the
+compiler rejects a call site that has not been updated rather than letting it
+silently misprice. The fee-less primitives (`math::amm::sell_quote`,
+`buy_token_quote_with_sol`, `sell_token_quote_with_sol`, `validate_market_cap`)
+likewise take it as a distinct argument. `math::amm::effective_quote_reserve`
+exposes the sum directly for hand-rolled math, and returns
+`QuoteError::EmptyReserves` when the effective reserve is zero or negative.
+
+A pool whose raw quote vault is empty but whose virtual reserve is non-zero is
+tradable. Liquidity and depth checks must be judged on effective reserves, or
+a live pool gets rejected as empty.
+
+### The field is `i128` and signed
+
+`virtual_quote_reserves` is `i128` (16 bytes), matching the on-chain IDL, and
+it is **signed**. Two consequences:
+
+- Declaring it `u64` misreads the field width and shifts every byte after it.
+- A negative value is legitimate and makes the pool **shallower** than its raw
+  vault balance suggests. Never `as u64` it and never subtract it with
+  unsigned arithmetic: in debug that panics, and in release it wraps to a
+  near-`u64::MAX` reserve, which a sizing routine reads as bottomless
+  liquidity. That is the worst available failure mode.
+
+`effective_quote_reserve` promotes the raw `u64` balance to `i128`, adds with
+`checked_add`, and converts back with `u64::try_from`, so a non-positive
+result surfaces as `QuoteError::EmptyReserves` (an untradable pool) rather
+than as a plausible-looking number.
+
+The `BuyEvent` and `SellEvent` logs carry an appended `virtual_quote_reserves`
+too (plus `can_boost` and `base_supply`). Existing Borsh decoders still read
+the earlier fields correctly, but an indexer reconstructing reserves from the
+event stream must read the new field to price correctly.
+
+Note that `BondingCurve::virtual_quote_reserves` (pre-graduation, pump program)
+and `Pool::virtual_quote_reserves` (post-graduation AMM) are different values
+that share a name. The bonding-curve field is part of the curve's own
+constant-product formula and is unrelated to effective AMM reserves.
+
 ## Instruction reference
 
 All builders live on `PumpSdk`. Prefer the `*_instructions` (plural)

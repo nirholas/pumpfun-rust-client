@@ -43,11 +43,21 @@ pub fn bonding_curve_market_cap(
 }
 
 /// AMM pool market cap in lamports.
-/// `marketCap = quoteReserve * baseMintSupply / baseReserve`.
+/// `marketCap = effectiveQuoteReserve * baseMintSupply / baseReserve`.
+///
+/// `effective_quote_reserve` must already be
+/// `pool_quote_token_account.amount + Pool::virtual_quote_reserves` (see
+/// [`crate::math::amm::effective_quote_reserve`]). Passing the raw vault
+/// balance understates the market cap of a boost pool and can select a
+/// lower fee tier than the program will actually charge.
 #[inline]
-pub fn pool_market_cap(base_mint_supply: u64, base_reserve: u64, quote_reserve: u64) -> u128 {
+pub fn pool_market_cap(
+    base_mint_supply: u64,
+    base_reserve: u64,
+    effective_quote_reserve: u64,
+) -> u128 {
     debug_assert!(base_reserve != 0);
-    (quote_reserve as u128) * (base_mint_supply as u128) / (base_reserve as u128)
+    (effective_quote_reserve as u128) * (base_mint_supply as u128) / (base_reserve as u128)
 }
 
 /// `true` iff `pool_creator` matches the canonical pump-program-derived pool

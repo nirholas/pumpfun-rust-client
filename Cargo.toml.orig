@@ -1,6 +1,6 @@
 [package]
 name = "pump-rust-client"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.86"
 # `resolver = "3"` requires Cargo's unstable `edition2024` (rejected by solana-verify / cargo 1.81).

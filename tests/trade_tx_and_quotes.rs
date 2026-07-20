@@ -392,7 +392,10 @@ async fn quote_amm_token_out_simulation_matches() {
         .as_ref()
         .and_then(|acct| decode_fee_config(&acct.data).ok());
 
-    // Live reserves come straight from the pool's token accounts.
+    // Live reserves come straight from the pool's token accounts. The quote
+    // side is the RAW vault balance: `virtual_quote_reserves` is passed
+    // separately below and summed by the quote math, so adding it here would
+    // double-count it.
     let base_reserve = token_balance(&rpc, &pool.pool_base_token_account).await;
     let quote_reserve = token_balance(&rpc, &pool.pool_quote_token_account).await;
     let base_supply = match rpc.get_token_supply(&mint).await {
@@ -409,6 +412,7 @@ async fn quote_amm_token_out_simulation_matches() {
                 pool: &pool,
                 base_reserve,
                 quote_reserve,
+                virtual_quote_reserves: pool.virtual_quote_reserves,
                 base_mint_supply: base_supply,
             },
             target_amount,
