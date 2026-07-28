@@ -22,7 +22,7 @@ autotests = false
 autobenches = false
 description = "Rust SDK for the pump and pump_amm Solana programs: instruction builders, quoting, PDA helpers, and optional RPC client features."
 readme = "README.md"
-license = "MIT"
+license-file = "LICENSE"
 resolver = "2"
 
 [features]
