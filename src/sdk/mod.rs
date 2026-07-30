@@ -770,7 +770,6 @@ mod tests {
         let creator = fake_pubkey(84);
         let fee_recipient = fake_pubkey(85);
         let buyback_fee_recipient = fake_pubkey(86);
-        let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
         let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
