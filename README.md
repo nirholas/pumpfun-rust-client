@@ -358,3 +358,10 @@ PDA / account-meta derivation.
 If you want to CPI into pump's `buy_v2` / `sell_v2` from your own Anchor
 program and reuse this SDK to derive the account metas, see
 [`CPI_README.md`](CPI_README.md).
+
+## Documentation
+
+Full documentation site: **https://nirholas.github.io/pumpfun-rust-client/**
+
+- [Getting started](docs/getting-started.md) covers install and first run.
+- [Examples](docs/examples.md) has copy-paste snippets.
