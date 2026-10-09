@@ -5,6 +5,9 @@ pub mod bonding_curve;
 pub mod fees;
 pub mod utils;
 
+#[cfg(test)]
+mod synthetic_migration_tests;
+
 pub use bonding_curve::TOKEN_SUPPLY;
 
 /// Quote failure modes (empty reserves, bad inputs, fee overflow, etc.).

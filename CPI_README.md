@@ -73,6 +73,16 @@ on legacy accounts. The same applies to the other re-exports under
 `pump_rust_client::state` and its `pump_amm` / `pump_agent_payments`
 submodules (`Global`, `FeeConfig`, `pump_amm::Pool`, …).
 
+This padding is what lets `pump_amm::Pool` decode every layout of the account
+across the `virtual_quote_reserves` rollout: a pool written before the field
+was appended decodes with `virtual_quote_reserves == 0`, the correct value for
+it. The field is a signed `i128` (boost minus the un-swept fee buckets), so any
+CPI or off-chain code that prices against pool reserves must use
+`pool_quote_token_account.amount as i128 + pool.virtual_quote_reserves`, or
+`math::amm::effective_quote_reserve(&pool, vault_balance)`, never the raw
+vault balance and never the field cast to `u64`. See the README's "AMM
+pricing" section.
+
 You're also welcome to look into the source code (`src/account_wrapper.rs`)
 to see how on-chain accounts like `BondingCurve` are deserialized without
 errors by padding short buffers with extra zeros.

@@ -2,9 +2,9 @@
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>pumpfun-rust-client documentation</title>
-<meta name="description" content="Rust SDK for the `pump` and `pump_amm` Solana programs. Three things in one crate:">
+<meta name="description" content="Rust SDK for the pump bonding curve and PumpSwap Solana programs: v2 and v3 trades, multi-hop swaps, fee sweeps and exact on-chain quoting.">
 <meta property="og:title" content="pumpfun-rust-client documentation">
-<meta property="og:description" content="Rust SDK for the `pump` and `pump_amm` Solana programs. Three things in one crate:">
+<meta property="og:description" content="Rust SDK for the pump bonding curve and PumpSwap Solana programs: v2 and v3 trades, multi-hop swaps, fee sweeps and exact on-chain quoting.">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128230;</text></svg>">
 <style>
@@ -70,29 +70,40 @@ footer.site{border-top:1px solid var(--line);padding:28px 0 40px;color:var(--mut
 <section class="hero" style="border:0">
   <span class="eyebrow">nirholas / pumpfun-rust-client</span>
   <h1>pumpfun-rust-client</h1>
-  <p class="lede">Rust SDK for the `pump` and `pump_amm` Solana programs. Three things in one crate:</p>
-  <div class="badges"><span class="badge">Rust</span></div>
+  <p class="lede">Rust SDK for the pump bonding curve and PumpSwap (<code>pump_amm</code>) Solana programs: instruction builders, quoting that matches the programs to the lamport, and an RPC client that turns a mint into signed-ready instructions. Tracks <code>pump-rust-client</code> 0.4.0.</p>
+  <div class="badges"><span class="badge">Rust 1.89+</span><span class="badge">pump-rust-client 0.4.0</span><span class="badge">Solana</span></div>
   <div class="cta">
     <a class="btn" href="#start">Get started</a>
     <a class="btn ghost" href="https://github.com/nirholas/pumpfun-rust-client">View source</a>
   </div>
-  <div class="install"><code>git clone https://github.com/nirholas/pumpfun-rust-client.git</code><button class="copy" type="button">Copy</button></div>
+  <div class="install"><code>pump-rust-client = { git = "https://github.com/nirholas/pumpfun-rust-client", features = ["client"] }</code><button class="copy" type="button">Copy</button></div>
 </section>
 
-<section id="features"><h2 class="sec">What it does</h2><p class="sub">Capabilities documented in this repository.</p><div class="grid"><div class="card"><h3>Quoting</h3><p>See the <a href="https://github.com/nirholas/pumpfun-rust-client#readme">full documentation</a> for details.</p></div><div class="card"><h3>AMM pricing virtual_quote_reserves</h3><p>See the <a href="https://github.com/nirholas/pumpfun-rust-client#readme">full documentation</a> for details.</p></div><div class="card"><h3>The field is i128 and signed</h3><p>See the <a href="https://github.com/nirholas/pumpfun-rust-client#readme">full documentation</a> for details.</p></div><div class="card"><h3>Instruction reference</h3><p>See the <a href="https://github.com/nirholas/pumpfun-rust-client#readme">full documentation</a> for details.</p></div><div class="card"><h3>Building signing and sending  AsyncPumpClient</h3><p>See the <a href="https://github.com/nirholas/pumpfun-rust-client#readme">full documentation</a> for details.</p></div><div class="card"><h3>Account initialization</h3><p>See the <a href="https://github.com/nirholas/pumpfun-rust-client#readme">full documentation</a> for details.</p></div></div></section>
+<section id="features"><h2 class="sec">What it does</h2><p class="sub">Capabilities documented in this repository.</p><div class="grid"><div class="card"><h3>v3 curve trades</h3><p><code>buy_v3</code>, <code>buy_exact_quote_in_v3</code> and <code>sell_v3</code> builders, with fees left in the curve's buckets and the buyback paid in the trade.</p></div><div class="card"><h3>Synthetic migration quotes</h3><p><code>buy_quote_bonding_curve_v3_sol_in</code> and <code>_token_out</code> price the buy that empties a curve, including the part bought from the pool the migration will create.</p></div><div class="card"><h3>PumpSwap v2 and multi-hop</h3><p>v2 pool trades, <code>multi_hop_swap</code> route discovery and quoting, and coins quoted in another pump coin.</p></div><div class="card"><h3>Signed virtual reserves</h3><p>PumpSwap quotes price on the vault plus the signed <code>i128</code> <code>Pool.virtual_quote_reserves</code> and pay sells from the vault less the fee buckets.</p></div><div class="card"><h3>Fee sweeps</h3><p><code>sweep_creator_fee</code> and <code>sweep_pool_creator_fee</code> builders, prepended automatically where the programs require an empty bucket.</p></div><div class="card"><h3>AsyncPumpClient</h3><p>Fetches every account a trade needs in one round trip, quotes with slippage and returns instructions ready to sign.</p></div></div></section>
 
 <section id="start">
   <h2 class="sec">Get started</h2>
-  <p class="sub">Install it, then run your first command.</p>
-  <pre><code>git clone https://github.com/nirholas/pumpfun-rust-client.git</code></pre>
-  
+  <p class="sub">Clone, build and run the unit tests, which check every quote path against the published formulas.</p>
+  <pre><code>git clone https://github.com/nirholas/pumpfun-rust-client.git
+cd pumpfun-rust-client
+cargo build --locked
+cargo test --locked</code></pre>
+
   <p><a href="./getting-started.md">Read the full getting started guide</a></p>
 </section>
 
 <section id="examples">
   <h2 class="sec">Examples</h2>
-  <p class="sub">Taken directly from this repository's documentation.</p>
-  <p>Browse the <a href='https://github.com/nirholas/pumpfun-rust-client'>repository</a> for usage.</p>
+  <p class="sub">Quote a v3 buy, then build it.</p>
+  <pre><code>let s = client.fetch_curve_quote_state(&amp;mint).await?;
+let quote = client.sdk().buy_quote_bonding_curve_v3_sol_in(
+    &amp;s.global, &amp;s.fee_config, &amp;s.bonding_curve,
+    s.mint_supply, s.base_ata_amount,
+    LAMPORTS_PER_SOL, 100,
+)?;
+let (quote, ixs) = client
+    .build_buy_exact_quote_in_v3(&amp;user, &amp;mint, LAMPORTS_PER_SOL, 100)
+    .await?;</code></pre>
   <p><a href="./examples.md">More examples</a></p>
 </section>
 

@@ -327,6 +327,74 @@ a separate setup transaction.
 If you need different behavior (e.g. you manage user ATAs upstream), call
 the singular `*_instruction` builders directly.
 
+## Synthetic migration: v3 buys past the curve
+
+`buy_v3`, `buy_exact_quote_in_v3` and a bonding-curve hop of `multi_hop_swap`
+have no max size on the buy that empties a non-mayhem curve. That buy takes
+the remainder at the curve price, completes the curve, and buys the rest from
+the reserves `migrate_v2` would deposit (the "pool-to-be"), all in one trade.
+The `*_v3_*` quoters price both parts, so they need the curve's base ATA
+balance, which `AsyncPumpClient::fetch_curve_quote_state` returns as
+`base_ata_amount`:
+
+```rust
+let s = client.fetch_curve_quote_state(&mint).await?;
+let quote = sdk.buy_quote_bonding_curve_v3_sol_in(
+    &s.global,
+    &s.fee_config,
+    &s.bonding_curve,
+    s.mint_supply,
+    s.base_ata_amount, // sizes the pool-to-be
+    100 * LAMPORTS_PER_SOL,
+    100,
+)?;
+// quote.amount            tokens out, curve part plus pool part
+// quote.input_amount_used what the program charges (the rest stays with you)
+// quote.min_out           pass as min_tokens_out
+```
+
+The pool-to-be the quoters price on, per the published spec
+(`docs/SYNTHETIC_MIGRATION.md` in pump-public-docs):
+
+```text
+pool_base  = base_ata_amount - real_token_reserves
+pool_quote = real_quote_reserves + curve_cost(real_token_reserves) - pool_migration_fee   (SOL-paired)
+           = real_quote_reserves + curve_cost(real_token_reserves)                        (token-paired)
+token out:  quote_in = ceil(pool_quote * out / (pool_base - out))
+quote in:   out      = floor((in - 1) * pool_base / (pool_quote + in - 1))
+```
+
+Each part pays the bonding-curve fee schedule. Mayhem curves keep the v2
+partial fill. They cannot be a `multi_hop_swap` hop at all: the program fails
+with `MultiHopMayhemCurveNotSupported` (error 6108) and `quote_multi_hop_swap`
+returns `QuoteError::VenueNotSupported` before you send it. After the migration, the
+completed curve's `post_complete_base_out` / `post_complete_quote_in` are folded
+into `AmmQuoteSource::BondingCurveComplete`, so a PumpSwap quote taken before
+the pool account exists opens where the synthetic leg stopped.
+`src/math/synthetic_migration_tests.rs` checks every one of these against an
+independent transcription of the spec formulas.
+
+## AMM pricing: signed `virtual_quote_reserves`
+
+`Pool.virtual_quote_reserves` is an `i128`. It is the pool's boost minus its
+un-swept fee buckets (`protocol_fees + creator_fees`), so it goes negative on
+any pool that has collected v2 fees and has no boost. Every AMM quote prices
+against the effective reserve:
+
+```text
+effective_quote_reserve = pool_quote_token_account.amount + pool.virtual_quote_reserves
+```
+
+while sells are paid out of `amount - protocol_fees - creator_fees`
+(`math::amm::real_quote_reserve`). Pass the **raw** vault balance as
+`AmmQuoteSource::Pool { quote_reserve, .. }`; the quoters add the signed field
+themselves. Hand-rolled math should call
+`math::amm::effective_quote_reserve(&pool, vault_balance)`, which returns
+`QuoteError::MathOverflow` when the sum is negative or does not fit a `u64`.
+Never cast the field to `u64`: a negative value wraps to a huge reserve and
+misprices every trade. Pools written before the field existed decode it as `0`
+(`AccountWrapper` zero-pads short buffers), where effective equals raw.
+
 ## Examples
 
 | Example | Demonstrates |
@@ -368,3 +436,10 @@ PDA / account-meta derivation.
 If you want to CPI into pump's `buy_v2` / `sell_v2` from your own Anchor
 program and reuse this SDK to derive the account metas, see
 [`CPI_README.md`](CPI_README.md).
+
+## Documentation
+
+Full documentation site: **https://nirholas.github.io/pumpfun-rust-client/**
+
+- [Getting started](docs/getting-started.md) covers install, build, test and a first quote.
+- [Examples](docs/examples.md) has copy-paste snippets for every trade and quote path.
