@@ -443,3 +443,7 @@ Full documentation site: **https://nirholas.github.io/pumpfun-rust-client/**
 
 - [Getting started](docs/getting-started.md) covers install, build, test and a first quote.
 - [Examples](docs/examples.md) has copy-paste snippets for every trade and quote path.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=nirholas/pumpfun-rust-client&type=Date)](https://www.star-history.com/#nirholas/pumpfun-rust-client&Date)
