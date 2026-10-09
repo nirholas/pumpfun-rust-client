@@ -398,7 +398,10 @@ async fn amm_buy_sell_full_flow() {
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
     let user_base_ata = pda::associated_token(&user.pubkey(), &base_token_program, &mint).0;
     let max_sol_cost = LAMPORTS_PER_SOL;
-    let base_amount_out = 1_000_000u64; // tiny: exact value depends on cloned pool reserves
+    // Large enough that the sell's quote out (and so its creator fee) is
+    // non-zero: with a zero creator fee the program reads the buyback
+    // recipient from remaining-account index 0 instead of after `pool_v2`.
+    let base_amount_out = 1_000_000_000u64;
 
     // ---- Tx 1: AMM buy needs the user's base ATA, the user's wSOL ATA
     //            (sink for rent + source for quote-in), and the buyback

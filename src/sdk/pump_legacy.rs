@@ -1,9 +1,9 @@
-use anchor_lang::{InstructionData, ToAccountMetas};
-use solana_program::{
+use anchor_lang::solana_program::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    system_program, sysvar,
 };
+use anchor_lang::system_program;
+use anchor_lang::{InstructionData, ToAccountMetas};
 
 use crate::{constants, pda, pump::client, pump::types::OptionBool};
 
@@ -37,7 +37,7 @@ impl PumpSdk {
             system_program: system_program::ID,
             token_program,
             associated_token_program: constants::SPL_ATA_PROGRAM_ID,
-            rent: sysvar::rent::ID,
+            rent: Pubkey::from_str_const("SysvarRent111111111111111111111111111111111"),
             event_authority: pda::pump::event_authority().0,
             program: crate::pump::ID,
         };
@@ -91,6 +91,9 @@ impl PumpSdk {
             amount,
             max_sol_cost,
             track_volume: OptionBool(true),
+            // Fill what the curve still holds instead of failing, as the quote
+            // helpers assume.
+            partial_fill: OptionBool(true),
         };
         let mut metas = accounts.to_account_metas(None);
         metas.push(AccountMeta::new_readonly(

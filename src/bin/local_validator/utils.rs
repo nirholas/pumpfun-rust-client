@@ -4,6 +4,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use anchor_lang::system_program;
 use anchor_spl::associated_token::get_associated_token_address_with_program_id;
 use anchor_spl::token::spl_token;
 use crossbeam_channel::unbounded;
@@ -13,7 +14,6 @@ use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{read_keypair_file, write_keypair_file, Keypair};
 use solana_sdk::signer::Signer;
-use solana_sdk::system_program;
 use spl_token::state::Account as SplAccount;
 use spl_token_2022::extension::{
     BaseStateWithExtensions, BaseStateWithExtensionsMut, ExtensionType, PodStateWithExtensions,

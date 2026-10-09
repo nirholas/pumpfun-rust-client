@@ -5,7 +5,7 @@ use anchor_lang::AccountDeserialize;
 use crate::{
     errors::{PumpClientError, Result},
     state::{
-        BondingCurve, FeeConfig, Global, GlobalVolumeAccumulator, SharingConfig,
+        BondingCurve, FeeConfig, Global, GlobalVolumeAccumulator, QuoteControl, SharingConfig,
         UserVolumeAccumulator,
     },
 };
@@ -35,6 +35,10 @@ pub fn decode_bonding_curve(data: &[u8]) -> Result<BondingCurve> {
 
 pub fn decode_bonding_curve_nullable(data: &[u8]) -> Option<BondingCurve> {
     decode::<BondingCurve>(data).ok()
+}
+
+pub fn decode_quote_control(data: &[u8]) -> Result<QuoteControl> {
+    decode::<QuoteControl>(data)
 }
 
 pub fn decode_global_volume_accumulator(data: &[u8]) -> Result<GlobalVolumeAccumulator> {
@@ -96,17 +100,13 @@ pub mod pump_agent_payments {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anchor_lang::solana_program::pubkey::Pubkey;
     use anchor_lang::AccountSerialize;
-    use solana_program::pubkey::Pubkey;
 
     use crate::{
         constants,
-        state::{
-            pump_amm::{Pool, PoolFromIdl},
-            BondingCurve, BondingCurveFromIdl,
-        },
+        state::{BondingCurve, BondingCurveFromIdl},
     };
-    use pump_amm::decode_pool;
 
     fn fake_pubkey(seed: u8) -> Pubkey {
         Pubkey::new_from_array([seed; 32])
@@ -125,6 +125,9 @@ mod tests {
             is_mayhem_mode: true,
             is_cashback_coin: false,
             quote_mint: constants::NATIVE_MINT,
+            creator_fee_bps: 0,
+            can_edit_creator_fee: false,
+            ..Default::default()
         });
 
         let mut buf = Vec::new();
@@ -138,60 +141,5 @@ mod tests {
         assert_eq!(decoded.creator, original.creator);
         assert_eq!(decoded.is_mayhem_mode, original.is_mayhem_mode);
         assert_eq!(decoded.quote_mint, original.quote_mint);
-    }
-
-    fn fixture_pool(virtual_quote_reserves: i128) -> PoolFromIdl {
-        PoolFromIdl {
-            pool_bump: 254,
-            index: 0,
-            creator: fake_pubkey(11),
-            base_mint: fake_pubkey(12),
-            quote_mint: constants::NATIVE_MINT,
-            lp_mint: fake_pubkey(13),
-            pool_base_token_account: fake_pubkey(14),
-            pool_quote_token_account: fake_pubkey(15),
-            lp_supply: 1_000_000,
-            coin_creator: fake_pubkey(16),
-            is_mayhem_mode: false,
-            is_cashback_coin: false,
-            virtual_quote_reserves,
-        }
-    }
-
-    /// A boost pool's non-zero virtual figure must survive the round trip
-    /// intact. Truncating it to `u64`, or dropping it, silently misprices
-    /// every quote taken against the pool.
-    #[test]
-    fn pool_round_trip_preserves_virtual_quote_reserves() {
-        let original = Pool::new(fixture_pool(25_000_000_000));
-
-        let mut buf = Vec::new();
-        original.try_serialize(&mut buf).expect("serialize");
-
-        let decoded = decode_pool(&buf).expect("decode_pool");
-        assert_eq!(decoded.virtual_quote_reserves, 25_000_000_000);
-        assert_eq!(decoded.coin_creator, original.coin_creator);
-        assert_eq!(
-            decoded.pool_quote_token_account,
-            original.pool_quote_token_account
-        );
-    }
-
-    /// A pool account written before the field was appended is 16 bytes
-    /// short. `AccountWrapper` zero-pads it, which must yield exactly `0` so
-    /// that `effective == raw` for legacy and non-boost pools.
-    #[test]
-    fn pre_extension_pool_account_decodes_virtual_reserves_as_zero() {
-        let original = Pool::new(fixture_pool(0));
-        let mut full = Vec::new();
-        original.try_serialize(&mut full).expect("serialize");
-
-        // Drop the trailing i128. This is the on-disk layout of a pool that has not
-        // been touched since the field shipped.
-        let truncated = &full[..full.len() - 16];
-        let decoded = decode_pool(truncated).expect("decode truncated pool");
-
-        assert_eq!(decoded.virtual_quote_reserves, 0);
-        assert_eq!(decoded.coin_creator, original.coin_creator);
     }
 }

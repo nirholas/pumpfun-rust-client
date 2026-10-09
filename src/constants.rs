@@ -7,7 +7,7 @@
 //! seed strings) are sourced directly from the IDLs in `idls/pump.json` and
 //! `idls/pump_amm.json`.
 
-use solana_program::{pubkey, pubkey::Pubkey};
+use anchor_lang::solana_program::pubkey::Pubkey;
 
 pub const SPL_TOKEN_PROGRAM_ID: Pubkey = anchor_spl::token::ID;
 pub const SPL_TOKEN_2022_PROGRAM_ID: Pubkey = anchor_spl::token_2022::ID;
@@ -15,15 +15,23 @@ pub const SPL_ATA_PROGRAM_ID: Pubkey = anchor_spl::associated_token::ID;
 pub const MPL_TOKEN_METADATA_PROGRAM_ID: Pubkey = anchor_spl::metadata::ID;
 /// Wrapped-SOL mint, used as the default quote mint.
 pub const NATIVE_MINT: Pubkey = anchor_spl::token::spl_token::native_mint::ID;
+/// Rent sysvar account (required by `migrate` / `migrate_v2`).
+pub const RENT_SYSVAR_ID: Pubkey =
+    Pubkey::from_str_const("SysvarRent111111111111111111111111111111111");
 /// Pump's reward-token mint.
-pub const PUMP_TOKEN_MINT: Pubkey = pubkey!("pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn");
+pub const PUMP_TOKEN_MINT: Pubkey =
+    Pubkey::from_str_const("pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn");
 
-pub const FEE_PROGRAM_ID: Pubkey = pubkey!("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
-pub const MAYHEM_PROGRAM_ID: Pubkey = pubkey!("MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e");
+pub const FEE_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
+pub const MAYHEM_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e");
 
 /// Address lookup table for pump trades.
-pub const MAINNET_ALT: Pubkey = pubkey!("7mFD2mUtRS65XstiSAvCJuYmdesZoQwCwRJhq1p3eRMe");
-pub const DEVNET_ALT: Pubkey = pubkey!("7y3623xaVQzsLxHRyp1wQD4Pmer5JjgbaagGFAEqCjua");
+pub const MAINNET_ALT: Pubkey =
+    Pubkey::from_str_const("Hyif6eWb8x88RVrvjPfabsgRYnwkVnyByEXTVTXbUcyP");
+pub const DEVNET_ALT: Pubkey =
+    Pubkey::from_str_const("7Je3GuLHSXZT6oC96EuAKTH8LsMhvC32z72cqVxUnvR7");
 
 pub mod pump {
     use super::*;
@@ -31,6 +39,7 @@ pub mod pump {
     pub const PROGRAM_ID: Pubkey = crate::pump::ID;
 
     pub const GLOBAL_SEED: &[u8] = b"global";
+    pub const QUOTE_CONTROL_SEED: &[u8] = b"quote-control";
     pub const BONDING_CURVE_SEED: &[u8] = b"bonding-curve";
     pub const BONDING_CURVE_V2_SEED: &[u8] = b"bonding-curve-v2";
     pub const CREATOR_VAULT_SEED: &[u8] = b"creator-vault";
@@ -61,6 +70,10 @@ pub mod pump_amm {
     pub const POOL_V2_SEED: &[u8] = b"pool-v2";
     pub const FEE_CONFIG_SEED: &[u8] = b"fee_config";
     pub const FEE_CONFIG_PROGRAM_SEED_KEY: Pubkey = PROGRAM_ID;
+    pub const BOOST_VAULT_AUTHORITY_SEED: &[u8] = b"boost_vault";
+    /// Compute budget for `multi_hop_swap` (~30k CU per hop; a hop that
+    /// completes a curve costs more).
+    pub const MULTI_HOP_COMPUTE_UNITS: u32 = 1_400_000;
 }
 
 pub mod pump_agent_payments {

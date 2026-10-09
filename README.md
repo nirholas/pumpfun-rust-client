@@ -14,8 +14,9 @@ crate:
 
 Canonical sources:
 
-- Bonding-curve builders: [`src/sdk/pump_v2.rs`](src/sdk/pump_v2.rs)
-- AMM builders: [`src/sdk/pump_amm_ix.rs`](src/sdk/pump_amm_ix.rs)
+- Bonding-curve builders: [`src/sdk/pump_v2.rs`](src/sdk/pump_v2.rs),
+  v3 trades + creator sweep: [`src/sdk/pump_v3.rs`](src/sdk/pump_v3.rs)
+- AMM builders (v1 + v2 + pool sweep): [`src/sdk/pump_amm_ix.rs`](src/sdk/pump_amm_ix.rs)
 - Auto-routed trade + quote: [`src/sdk/trade_tx.rs`](src/sdk/trade_tx.rs)
 - Quote helpers: [`src/sdk/mod.rs`](src/sdk/mod.rs)
 - RPC wrapper: [`src/async_client.rs`](src/async_client.rs)
@@ -76,7 +77,7 @@ let bonding_curve = client.fetch_bonding_curve(&mint).await?;
 
 let quote = sdk.buy_quote_bonding_curve_sol_in(
     &global,
-    Some(&fee_config),
+    &fee_config,
     &bonding_curve,
     mint_supply,        // base mint supply
     LAMPORTS_PER_SOL,   // sol_amount in
@@ -100,7 +101,7 @@ let quote = sdk.quote_trade(TradeQuoteParams {
     slippage_bps: 100,
     base_mint_supply: mint_supply,
     pump_global: &global,
-    pump_fee_config: Some(&fee_config),
+    pump_fee_config: &fee_config,
     bonding_curve: &bonding_curve,
     pump_pool: None, // Some(PumpPoolQuoteCtx { … }) required when curve.complete
 }); // returns None if the curve is complete and pump_pool was not supplied
@@ -113,95 +114,29 @@ let quote = sdk.quote_trade(TradeQuoteParams {
 | `sell_quote_bonding_curve` | `src/sdk/mod.rs` | Tokens in → SOL out |
 | `buy_quote_amm_sol_in` / `buy_quote_amm_token_out` | `src/sdk/mod.rs` | AMM equivalents |
 | `sell_quote_amm` | `src/sdk/mod.rs` | AMM sell |
+| `buy_quote_bonding_curve_v3_sol_in` / `buy_quote_bonding_curve_v3_token_out` | `src/sdk/mod.rs` | v3 buys, post-completion leg included (take the curve's base ATA balance) |
+| `quote_multi_hop_swap` | `src/sdk/mod.rs` | `multi_hop_swap` route output from per-hop `RouteHop` state |
 | `quote_trade` | `src/sdk/trade_tx.rs` | Auto-routed via `bonding_curve.complete` |
 
-## AMM pricing: `virtual_quote_reserves`
-
-The PumpSwap `Pool` account carries a `virtual_quote_reserves` field. Every
-AMM quote, spot price, price-impact figure, and market cap prices against the
-**effective** quote reserve:
-
-```text
-effective_quote_reserve = pool_quote_token_account.amount + pool.virtual_quote_reserves
-```
-
-The base side is unchanged: base reserves are still the raw
-`pool_base_token_account.amount`.
-
-Boost pools carry a non-zero value from 2026-07-20. Non-boost pools, and every
-pool written before the field shipped, carry `0`, where `effective == raw` and
-quotes are byte-identical to earlier releases.
-`AccountWrapper` zero-pads short buffers, so a pool account that predates the
-field decodes as `0` rather than failing.
-
-**Pass the raw balance and the virtual figure separately.** The math sums them
-internally. Pre-summing double-counts:
-
-```rust
-use pump_rust_client::{AmmQuoteSource, PumpSdk};
-
-let quote = sdk.sell_quote_amm(
-    &global_config,
-    Some(&fee_config),
-    AmmQuoteSource::Pool {
-        pool: &pool,
-        base_reserve,                                       // raw base vault balance
-        quote_reserve,                                      // RAW quote vault balance
-        virtual_quote_reserves: pool.virtual_quote_reserves, // added internally
-        base_mint_supply,
-    },
-    token_amount,
-    100,
-)?;
-```
-
-```rust
-// WRONG: double-counts the virtual figure.
-quote_reserve: quote_reserve + pool.virtual_quote_reserves as u64,
-virtual_quote_reserves: pool.virtual_quote_reserves,
-
-// WRONG: prices a boost pool off the raw vault balance.
-virtual_quote_reserves: 0,
-```
-
-`AmmQuoteSource::Pool` and `PumpPoolQuoteCtx` both require the field, so the
-compiler rejects a call site that has not been updated rather than letting it
-silently misprice. The fee-less primitives (`math::amm::sell_quote`,
-`buy_token_quote_with_sol`, `sell_token_quote_with_sol`, `validate_market_cap`)
-likewise take it as a distinct argument. `math::amm::effective_quote_reserve`
-exposes the sum directly for hand-rolled math, and returns
-`QuoteError::EmptyReserves` when the effective reserve is zero or negative.
-
-A pool whose raw quote vault is empty but whose virtual reserve is non-zero is
-tradable. Liquidity and depth checks must be judged on effective reserves, or
-a live pool gets rejected as empty.
-
-### The field is `i128` and signed
-
-`virtual_quote_reserves` is `i128` (16 bytes), matching the on-chain IDL, and
-it is **signed**. Two consequences:
-
-- Declaring it `u64` misreads the field width and shifts every byte after it.
-- A negative value is legitimate and makes the pool **shallower** than its raw
-  vault balance suggests. Never `as u64` it and never subtract it with
-  unsigned arithmetic: in debug that panics, and in release it wraps to a
-  near-`u64::MAX` reserve, which a sizing routine reads as bottomless
-  liquidity. That is the worst available failure mode.
-
-`effective_quote_reserve` promotes the raw `u64` balance to `i128`, adds with
-`checked_add`, and converts back with `u64::try_from`, so a non-positive
-result surfaces as `QuoteError::EmptyReserves` (an untradable pool) rather
-than as a plausible-looking number.
-
-The `BuyEvent` and `SellEvent` logs carry an appended `virtual_quote_reserves`
-too (plus `can_boost` and `base_supply`). Existing Borsh decoders still read
-the earlier fields correctly, but an indexer reconstructing reserves from the
-event stream must read the new field to price correctly.
-
-Note that `BondingCurve::virtual_quote_reserves` (pre-graduation, pump program)
-and `Pool::virtual_quote_reserves` (post-graduation AMM) are different values
-that share a name. The bonding-curve field is part of the curve's own
-constant-product formula and is unrelated to effective AMM reserves.
+Quotes follow the on-chain fee resolution and take the pump-fees `FeeConfig`
+(`fetch_fee_config` for curves, `fetch_amm_fee_config` for pools; the two are
+different PDAs): the schedule is picked by quote mint, and a coin's own
+`creator_fee_bps` (set at `create_v2`) replaces the schedule's creator rate
+while `Global.creator_fee_configurable` is on. `Global`'s own bps fields play
+no part in pricing. A v2 buy that would take more than a curve's remaining
+tokens fills only the remainder and completes the curve (`partial_fill`), and
+the v2 `*_bonding_curve_*` quotes clamp to match. A v3 buy on a non-mayhem
+curve instead completes it and buys the rest from the pool the migration will
+create, in the same trade; quote v3 buys with the `*_v3_*` quoters (v2 quotes
+under-price them past the remaining supply). Pool quotes price against the vault plus
+`Pool.virtual_quote_reserves` and pay sells out of the vault less the un-swept
+fee buckets, as pump-amm does after v2 trades. A pump-amm disable flag
+surfaces as `TradingDisabled`. To quote the first buy of a coin that does not exist yet, build the
+curve with `PumpSdk::initial_bonding_curve` using the reserves from
+`PumpSdk::initial_virtual_quote_reserves` (`Global` whitelist, then the
+`quote-control` PDA via `fetch_quote_control`), or
+`PumpSdk::pump_quote_initial_virtual_quote_reserves` for a coin quoted in
+another pump coin.
 
 ## Instruction reference
 
@@ -217,9 +152,42 @@ ATAs themselves.
 | `buy_v2_instruction` / `buy_v2_instructions` | [`examples/buy_v2.rs`](examples/buy_v2.rs) |
 | `sell_v2_instruction` / `sell_v2_instructions` | [`examples/sell_v2.rs`](examples/sell_v2.rs) |
 | `buy_exact_quote_in_v2_instruction[s]` | — |
-| `create_v2_instruction` | [`examples/create_v2.rs`](examples/create_v2.rs) |
+| `create_v2_instruction` | [`examples/create_v2.rs`](examples/create_v2.rs), [`examples/create_v2_token2022_quote.rs`](examples/create_v2_token2022_quote.rs) |
 | `create_v2_and_buy_instruction` | [`examples/create_v2_and_buy.rs`](examples/create_v2_and_buy.rs) |
 | `create_coin_instructions` | — |
+
+**Bonding curve v3 (`pump_v3`)** — [`src/sdk/pump_v3.rs`](src/sdk/pump_v3.rs).
+One 17-account set, no fee recipients: the protocol fee (less its buyback
+slice) and the creator fee accrue in the curve's `protocol_fees` /
+`creator_fee` buckets until a permissionless sweep pays them out;
+the buyback slice is paid in the trade to `buyback_fee_recipient`. Pricing
+equals v2 up to the remaining supply; past it a buy takes the post-completion
+leg, so use the v3 quoters. Cashback coins stay on v2.
+
+| Builder | Example |
+| --- | --- |
+| `buy_v3_instruction` / `buy_v3_instructions` | [`examples/buy_v3.rs`](examples/buy_v3.rs) |
+| `buy_exact_quote_in_v3_instruction[s]` | — |
+| `sell_v3_instruction` / `sell_v3_instructions` | — |
+| `sweep_creator_fee_instruction` | [`examples/sweep_creator_fee.rs`](examples/sweep_creator_fee.rs) |
+| `AsyncPumpClient::build_buy_v3` / `build_buy_exact_quote_in_v3` / `build_sell_v3` | One call: fetch, quote with slippage, instructions |
+
+The v3 builders work from keys alone: `(base_mint, quote_mint,
+base_token_program, quote_token_program, user, buyback_fee_recipient, amount,
+limit)`. Pass `Pubkey::default()` or wSOL as the quote of a SOL curve,
+Token-2022 as the base program of a `create_v2` coin and SPL Token for a
+legacy `create` coin (the mint account's owner). `buyback_fee_recipient` is a
+listed `Global.buyback_fee_recipients` wallet
+(`PumpSdk::buyback_fee_recipient_from_pump_global` draws one); the builder
+passes the wallet itself on a SOL curve and its quote ATA on a token quote.
+The program never creates that ATA: the plural `*_v3_instructions` prepend an
+idempotent create (the user pays), the singular builders need it to exist. `fetch_curve_quote_state` returns all of that plus
+the state the quoters need; the `build_*_v3` helpers use it.
+
+Prepend `sweep_creator_fee_instruction` in the same transaction as any
+`distribute_creator_fees*`, `update_fee_shares*` or `admin_cto` on a coin
+that has seen a v3 trade; those fail with `CreatorFeesNotSwept` otherwise.
+`distribute_creator_fees_v2_instructions` does this for you.
 
 **AMM (`pump_amm`, post-graduation)** — [`src/sdk/pump_amm_ix.rs`](src/sdk/pump_amm_ix.rs):
 
@@ -227,6 +195,9 @@ ATAs themselves.
 | --- | --- |
 | `buy_amm_instruction` / `buy_amm_instructions` | [`examples/buy_amm.rs`](examples/buy_amm.rs) |
 | `sell_amm_instruction` / `sell_amm_instructions` | [`examples/sell_amm.rs`](examples/sell_amm.rs) |
+| `buy_amm_v2_instruction[s]` / `buy_exact_quote_in_amm_v2_instruction` / `sell_amm_v2_instruction[s]` | 17-account pool trades from a fetched `Pool` (the address is derived from its seeds) and a listed `GlobalConfig.buyback_fee_recipients` wallet, whose quote ATA (which must exist) takes the buyback slice in the trade; the rest of the protocol fee and the creator fee accrue in `Pool.protocol_fees` / `creator_fees`. Any pool but a cashback coin's (a mayhem pool takes no buyback slice, a non-pump pool pays the flat fees) |
+| `multi_hop_swap_instruction[s]` | One exact-in route through pump pools and bonding curves (`MultiHopHop::pool` / `::curve`, all hops one direction; a buy starting on a SOL curve pays native SOL and a sell ending on one pays lamports to the wallet, the user's wSOL ATA there being a placeholder that must exist; mayhem curves are refused). The protocol fee is paid on the hop in the user's currency, creator / LP fees on the target hop; `buyback_fee_recipient` is listed by that protocol-leg venue and its ATA is in the user's currency. ~30k CU per hop (`MULTI_HOP_COMPUTE_UNITS`); routes over 3 hops need a v0 transaction plus a lookup table |
+| `sweep_pool_creator_fee_instruction` | Pays `Pool.creator_fees` into the coin-creator vault authority's ATA; prepend before `admin_cto_pool`, fee-sharing setup and pump-fees `update_fee_shares(_v2)` (which fail with `CreatorFeesNotSwept` / `PoolCreatorFeesNotSwept` otherwise) |
 
 **Auto-routed trade** — [`src/sdk/trade_tx.rs`](src/sdk/trade_tx.rs):
 
@@ -234,6 +205,12 @@ ATAs themselves.
 | --- | --- |
 | `trade_tx_instructions` | Routes on `bonding_curve.complete`; wraps/unwraps wSOL for native-quote AMM trades |
 | `trade_tx_instructions_with_venue` | Same, but the caller pins the `TradeVenue` |
+
+**pump-fees** — [`src/sdk/pump_fees_ix.rs`](src/sdk/pump_fees_ix.rs):
+
+| Builder | Notes |
+| --- | --- |
+| `update_fee_shares_instruction` / `update_fee_shares_v2_instruction` | Replace a coin's shareholders; the current shareholders (plus their quote ATAs on v2) are remaining accounts, and a complete curve's canonical pool goes last. Sweep first (`sweep_creator_fee_instruction` / `sweep_pool_creator_fee_instruction`) |
 
 The auto-routed builders take `TradeTxParams` / `TradeTxWithVenueParams`
 (both re-exported at the crate root, see [`src/lib.rs`](src/lib.rs)) and
@@ -246,6 +223,19 @@ pick the correct fee recipients and quote layout.
 `create_v2_and_buy_instruction` synthesises a bonding-curve preview
 internally from the supplied `quote_mint` (`Pubkey::default()` → wSOL),
 so a fetch is not required before the curve exists.
+
+The `create_v2` builders take the `quote_token_program` owning the quote
+mint (SPL Token or Token-2022; xStock mints are Token-2022) and a
+`creator_fee_bps` (`0` = pump-fees schedule rate). For a non-SOL quote the
+builder appends four remaining accounts: quote mint, the curve's quote ATA,
+the quote token program, and the `quote-control` PDA, which the program
+reads only when `Global` does not whitelist the mint. v2 trades create the
+buyback recipient's quote ATA on-chain (the user pays).
+
+To quote a coin in another pump coin Q, append
+`PumpSdk::create_v2_pump_quote_accounts` (or `fetch_pump_quote_create`'s
+`remaining_accounts`) and budget ~250k CU; the program derives the reserves
+from Q's price (`Global.max_curve_depth` gates it, 0 disables).
 
 ## Building, signing, and sending — `AsyncPumpClient`
 
@@ -297,6 +287,13 @@ let sig = client.send_and_confirm_transaction(&tx).await?;
 | Helper | Purpose |
 | --- | --- |
 | `fetch_global` / `fetch_fee_config` / `fetch_bonding_curve` | Load the on-chain state needed by builders and quoters |
+| `fetch_pool` / `fetch_amm_global_config` / `fetch_amm_fee_config` | The pump-amm side of the same |
+| `fetch_mint` / `fetch_curve_quote_state` | Mint supply + owning token program; everything a curve quote or v3 trade needs in one snapshot |
+| `build_buy_v3` / `build_buy_exact_quote_in_v3` / `build_sell_v3` | Fetch, quote with slippage and build a v3 trade in one call |
+| `discover_route` | Walk `out_mint`'s quote chain back to its root currency (or a `stop_at` coin) into a `MultiHopRoute`: open curves become curve hops, graduated ones their canonical pool |
+| `fetch_multi_hop_quote_state` | One two-round batched fetch of a route's state (`MultiHopQuoteState`); `quote` / `instructions` on it reuse the snapshot |
+| `build_multi_hop_swap` / `build_multi_hop_swap_from` / `build_multi_hop_swap_for_route` | Discover (from the root currency, or from a coin you hold), quote with slippage and build `multi_hop_swap` in one call; `_for_route` takes a known route |
+| `fetch_pump_quote_create` | Derived reserves, depth and remaining accounts for a `create_v2` quoted in a pump coin |
 | `fetch_buy_state` / `fetch_sell_state` | One round-trip fetch of bonding curve + user ATA |
 | `fetch_global_volume_accumulator` / `fetch_user_volume_accumulator` | Volume accumulators (cashback) |
 | `get_creator_vault_balance` | Spendable lamports above rent |
@@ -338,14 +335,27 @@ the singular `*_instruction` builders directly.
 | [`examples/buy_v2.rs`](examples/buy_v2.rs) | Bonding-curve buy with `buy_v2_instructions` |
 | [`examples/sell_v2.rs`](examples/sell_v2.rs) | Buy → sell cycle with `buy_v2_instructions` + `sell_v2_instructions` |
 | [`examples/create_v2_and_buy.rs`](examples/create_v2_and_buy.rs) | Atomic create + buy via `create_v2_and_buy_instruction` |
+| [`examples/create_v2_token2022_quote.rs`](examples/create_v2_token2022_quote.rs) | Standalone (env-configured) create + first buy with a Token-2022 / xStock quote mint, quote-control reserves, and a per-coin creator fee |
 | [`examples/buy_amm.rs`](examples/buy_amm.rs) | AMM buy on a graduated coin via `buy_amm_instructions` |
 | [`examples/sell_amm.rs`](examples/sell_amm.rs) | AMM buy → sell via `buy_amm_instructions` + `sell_amm_instructions` |
+| [`examples/buy_v3.rs`](examples/buy_v3.rs) | v3 bonding-curve buy, fees left in the curve's buckets, buyback paid in the trade |
+| [`examples/sweep_creator_fee.rs`](examples/sweep_creator_fee.rs) | Paying a curve's creator bucket into the creator vault |
+| [`examples/multi_hop_swap.rs`](examples/multi_hop_swap.rs) | A coin quoted in another pump coin (`fetch_pump_quote_create`), then USDC → Q → C with `build_multi_hop_swap` |
 
 ## Features
 
 - `client` — enables `AsyncPumpClient` and the `solana-sdk` / `solana-client`
   dependencies. Required to call `fetch_global` / `fetch_bonding_curve` and
   the transaction-building helpers.
+- `local-validator` — implies `client`; builds the `local-validator`,
+  `clone_devnet_accounts` and `airdropusdc` binaries, the examples and the
+  integration tests (`just test`). Building it needs libclang for RocksDB
+  (`LIBCLANG_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` set to
+  `/Library/Developer/CommandLineTools/usr/lib` on macOS). If another local
+  node holds 8899 / 9000, start the validator with `PUMP_LOCAL_RPC_PORT` /
+  `PUMP_LOCAL_FAUCET_PORT` and point the tests and examples at it with
+  `PUMP_LOCAL_RPC=http://127.0.0.1:<port>`. `just idls` refreshes `idls/` and
+  `artifacts/` from a `pump-programs-monorepo` checkout.
 
 Without `client`, the SDK still exposes every `*_instruction` /
 `*_instructions` builder and every quoter — only the RPC wrapper is gated.
@@ -358,10 +368,3 @@ PDA / account-meta derivation.
 If you want to CPI into pump's `buy_v2` / `sell_v2` from your own Anchor
 program and reuse this SDK to derive the account metas, see
 [`CPI_README.md`](CPI_README.md).
-
-## Documentation
-
-Full documentation site: **https://nirholas.github.io/pumpfun-rust-client/**
-
-- [Getting started](docs/getting-started.md) covers install and first run.
-- [Examples](docs/examples.md) has copy-paste snippets.

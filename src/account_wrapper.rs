@@ -7,8 +7,8 @@ use std::ops::{Deref, DerefMut};
 
 use anchor_lang::prelude::Pubkey;
 use anchor_lang::{
-    AccountDeserialize, AccountSerialize, AnchorDeserialize, AnchorSerialize, Discriminator,
-    Owner, Result,
+    AccountDeserialize, AccountSerialize, AnchorDeserialize, AnchorSerialize, Discriminator, Owner,
+    Result,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -115,8 +115,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anchor_lang::solana_program::pubkey::Pubkey;
     use anchor_lang::AccountSerialize;
-    use solana_program::pubkey::Pubkey;
 
     use crate::constants;
     use crate::state::{BondingCurve, BondingCurveFromIdl};
@@ -138,6 +138,9 @@ mod tests {
             is_mayhem_mode: true,
             is_cashback_coin: false,
             quote_mint: constants::NATIVE_MINT,
+            creator_fee_bps: 0,
+            can_edit_creator_fee: false,
+            ..Default::default()
         };
         let mut full = Vec::new();
         original.try_serialize(&mut full).expect("serialize");
@@ -145,13 +148,17 @@ mod tests {
         // Strip the trailing bytes — simulates a pre-extension on-chain
         // account. The wrapper should zero-pad and decode successfully,
         // yielding default-zero values for fields that lived in the
-        // truncated tail.
-        let truncated_len = full.len() - 33; // drop quote_mint (32) + is_cashback_coin (1)
+        // truncated tail. 83 bytes is the pre-quote-mint curve: discriminator,
+        // five u64 reserves, `complete`, `creator`, `is_mayhem_mode`.
+        let truncated_len = 8 + 5 * 8 + 1 + 32 + 1;
         let short = &full[..truncated_len];
 
         let decoded =
             <BondingCurve as AccountDeserialize>::try_deserialize(&mut &short[..]).expect("decode");
-        assert_eq!(decoded.virtual_token_reserves, original.virtual_token_reserves);
+        assert_eq!(
+            decoded.virtual_token_reserves,
+            original.virtual_token_reserves
+        );
         assert_eq!(decoded.creator, original.creator);
         assert_eq!(decoded.is_mayhem_mode, original.is_mayhem_mode);
         // Stripped fields land at their `Default` value (zero / Pubkey::default()).
@@ -172,12 +179,15 @@ mod tests {
             is_mayhem_mode: false,
             is_cashback_coin: true,
             quote_mint: constants::NATIVE_MINT,
+            creator_fee_bps: 0,
+            can_edit_creator_fee: false,
+            ..Default::default()
         };
         let mut full = Vec::new();
         original.try_serialize(&mut full).expect("serialize");
 
-        let decoded = <BondingCurve as AccountDeserialize>::try_deserialize(&mut &full[..])
-            .expect("decode");
+        let decoded =
+            <BondingCurve as AccountDeserialize>::try_deserialize(&mut &full[..]).expect("decode");
         assert_eq!(decoded.virtual_token_reserves, 42);
         assert_eq!(decoded.complete, original.complete);
         assert_eq!(decoded.creator, original.creator);

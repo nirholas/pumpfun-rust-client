@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -20,9 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Channel is pinned via rust-toolchain.toml (1.86.0); we just
-      # ensure rustfmt + clippy are installed for that exact version.
-      - uses: dtolnay/rust-toolchain@1.86.0
+      # Channel is pinned via rust-toolchain.toml (1.89.0), which overrides the
+      # toolchain for every cargo call. This action must install rustfmt +
+      # clippy for that EXACT version — keep it in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
 
@@ -32,7 +33,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --no-deps
+        run: cargo clippy --all-targets --no-deps --locked
 
       - name: cargo test
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked

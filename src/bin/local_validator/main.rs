@@ -76,7 +76,14 @@ async fn setup_validator() -> Result<TestValidatorGenesis, Box<dyn std::error::E
     let mut rpc_config = JsonRpcConfig::default_for_test();
     rpc_config.enable_rpc_transaction_history = true;
     g.rpc_config(rpc_config);
-    g.rpc_port(8899);
+    // `PUMP_LOCAL_RPC_PORT` moves the validator off 8899 when another local
+    // node (e.g. a mainnet simulator) already holds it; point the tests and
+    // examples at it with `PUMP_LOCAL_RPC=http://127.0.0.1:<port>`.
+    let rpc_port: u16 = std::env::var("PUMP_LOCAL_RPC_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8899);
+    g.rpc_port(rpc_port);
     g.ledger_path(LEDGER_PATH);
     g.max_genesis_archive_unpacked_size = Some(MAX_GENESIS_ARCHIVE_UNPACKED_SIZE);
     // Bind RPC to all interfaces so external explorers can connect.
@@ -84,7 +91,13 @@ async fn setup_validator() -> Result<TestValidatorGenesis, Box<dyn std::error::E
     // Default 5000 conflicts with macOS ControlCenter.
     g.gossip_port(5050);
 
-    let faucet_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9000);
+    // `PUMP_LOCAL_FAUCET_PORT` moves the faucet off 9000 for the same reason
+    // as `PUMP_LOCAL_RPC_PORT`; airdrops are proxied to it through the RPC.
+    let faucet_port: u16 = std::env::var("PUMP_LOCAL_FAUCET_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(9000);
+    let faucet_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), faucet_port);
     let faucet_pubkey = start_faucet(faucet_addr, LEDGER_PATH);
     g.faucet_addr(Some(faucet_addr));
 

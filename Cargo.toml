@@ -11,9 +11,9 @@
 
 [package]
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.89"
 name = "pump-rust-client"
-version = "0.2.0"
+version = "0.4.0"
 build = false
 autolib = false
 autobins = false
@@ -58,6 +58,11 @@ crate-type = ["lib"]
 path = "src/lib.rs"
 
 [[bin]]
+name = "airdropusdc"
+path = "src/bin/airdropusdc/main.rs"
+required-features = ["local-validator"]
+
+[[bin]]
 name = "clone_devnet_accounts"
 path = "src/bin/clone_devnet_accounts/main.rs"
 required-features = ["local-validator"]
@@ -78,8 +83,23 @@ path = "examples/buy_v2.rs"
 required-features = ["local-validator"]
 
 [[example]]
+name = "buy_v3"
+path = "examples/buy_v3.rs"
+required-features = ["local-validator"]
+
+[[example]]
 name = "claim_cashback_v2"
 path = "examples/claim_cashback_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "collect_coin_creator_fee"
+path = "examples/collect_coin_creator_fee.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "collect_creator_fee_v2"
+path = "examples/collect_creator_fee_v2.rs"
 required-features = ["local-validator"]
 
 [[example]]
@@ -93,6 +113,21 @@ path = "examples/create_v2_and_buy.rs"
 required-features = ["local-validator"]
 
 [[example]]
+name = "create_v2_token2022_quote"
+path = "examples/create_v2_token2022_quote.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "distribute_creator_fees_v2"
+path = "examples/distribute_creator_fees_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "multi_hop_swap"
+path = "examples/multi_hop_swap.rs"
+required-features = ["local-validator"]
+
+[[example]]
 name = "sell_amm"
 path = "examples/sell_amm.rs"
 required-features = ["local-validator"]
@@ -100,6 +135,16 @@ required-features = ["local-validator"]
 [[example]]
 name = "sell_v2"
 path = "examples/sell_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "sweep_creator_fee"
+path = "examples/sweep_creator_fee.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "transfer_creator_fees_to_pump_v2"
+path = "examples/transfer_creator_fees_to_pump_v2.rs"
 required-features = ["local-validator"]
 
 [[test]]
@@ -111,15 +156,27 @@ name = "buy_sell_instructions"
 path = "tests/buy_sell_instructions.rs"
 
 [[test]]
+name = "multi_hop_swap"
+path = "tests/multi_hop_swap.rs"
+
+[[test]]
 name = "trade_tx_and_quotes"
 path = "tests/trade_tx_and_quotes.rs"
+
+[[test]]
+name = "v2_creator_fees"
+path = "tests/v2_creator_fees.rs"
 
 [[test]]
 name = "v2_custom_quote_mint"
 path = "tests/v2_custom_quote_mint.rs"
 
+[[test]]
+name = "v3_trades"
+path = "tests/v3_trades.rs"
+
 [dependencies.anchor-lang]
-version = "0.31"
+version = ">=0.31, <2"
 features = [
     "event-cpi",
     "init-if-needed",
@@ -127,14 +184,13 @@ features = [
 ]
 
 [dependencies.anchor-spl]
-version = "0.31"
+version = ">=0.31, <2"
 features = [
     "metadata",
     "spl-token-group-interface",
     "token_2022",
     "spl-token-metadata-interface",
     "token_2022_extensions",
-    "spl-token-2022",
 ]
 
 [dependencies.bincode]
@@ -162,7 +218,7 @@ version = "1"
 optional = true
 
 [dependencies.solana-client]
-version = "2.1.21"
+version = ">=2.1.21, <3"
 optional = true
 
 [dependencies.solana-faucet]
@@ -170,14 +226,14 @@ version = "2.1.21"
 optional = true
 
 [dependencies.solana-program]
-version = "2.1.21"
+version = ">=2.1.21"
 
 [dependencies.solana-rpc]
 version = "2.1.21"
 optional = true
 
 [dependencies.solana-sdk]
-version = "2.1.21"
+version = ">=2.1.21, <3"
 optional = true
 
 [dependencies.solana-streamer]
@@ -206,11 +262,18 @@ version = "0.13"
 optional = true
 
 [dev-dependencies.solana-client]
-version = "2.1.21"
+version = ">=2.1.21, <3"
 
 [dev-dependencies.solana-sdk]
-version = "2.1.21"
+version = ">=2.1.21, <3"
 
 [dev-dependencies.tokio]
 version = "1.44.1"
 features = ["full"]
+
+[lints.clippy]
+too_many_arguments = "allow"
+
+[lints.rust.unexpected_cfgs]
+level = "allow"
+priority = 0

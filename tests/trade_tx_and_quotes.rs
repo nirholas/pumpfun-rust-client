@@ -23,7 +23,6 @@ use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 
-use pump_rust_client::accounts::decode_fee_config;
 use pump_rust_client::accounts::pump_amm::{decode_global_config, decode_pool};
 use pump_rust_client::{
     constants, pda, AmmQuoteSource, CreateCoinParams, PumpPoolCtx, PumpSdk, TradeTxParams,
@@ -187,7 +186,8 @@ async fn trade_tx_amm_buy_then_sell() {
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;
     let user_base_ata = pda::associated_token(&user.pubkey(), &base_token_program, &mint).0;
 
-    let buy_amount = 1_000_000u64;
+    // Large enough that the sell's creator fee is non-zero (see `buy_amm_instruction`).
+    let buy_amount = 1_000_000_000u64;
     let max_sol_cost = LAMPORTS_PER_SOL;
     let mut buy_ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(400_000)];
     buy_ixs.extend(
@@ -271,7 +271,7 @@ async fn quote_bc_token_out_simulation_matches() {
     let mint = NOT_GRADUATED_DEVNET_MINT;
 
     let global = client.fetch_global().await.unwrap();
-    let fee_config = client.fetch_fee_config().await.ok();
+    let fee_config = client.fetch_fee_config().await.expect("fetch_fee_config");
     let bc = client.fetch_bonding_curve(&mint).await.unwrap();
 
     // Quote: I want exactly 300M base units; what's the slippage-adjusted
@@ -280,7 +280,7 @@ async fn quote_bc_token_out_simulation_matches() {
     let quote = sdk
         .buy_quote_bonding_curve_token_out(
             &global,
-            fee_config.as_ref(),
+            &fee_config,
             &bc,
             global.token_total_supply,
             target_amount,
@@ -387,15 +387,12 @@ async fn quote_amm_token_out_simulation_matches() {
             .data,
     )
     .expect("decode_global_config");
-    let fee_config_account = rpc.get_account(&pda::pump_amm::fee_config().0).await.ok();
-    let amm_fee_config = fee_config_account
-        .as_ref()
-        .and_then(|acct| decode_fee_config(&acct.data).ok());
+    let amm_fee_config = client
+        .fetch_amm_fee_config()
+        .await
+        .expect("pump_amm fee_config");
 
-    // Live reserves come straight from the pool's token accounts. The quote
-    // side is the RAW vault balance: `virtual_quote_reserves` is passed
-    // separately below and summed by the quote math, so adding it here would
-    // double-count it.
+    // Live reserves come straight from the pool's token accounts.
     let base_reserve = token_balance(&rpc, &pool.pool_base_token_account).await;
     let quote_reserve = token_balance(&rpc, &pool.pool_quote_token_account).await;
     let base_supply = match rpc.get_token_supply(&mint).await {
@@ -407,12 +404,11 @@ async fn quote_amm_token_out_simulation_matches() {
     let quote = sdk
         .buy_quote_amm_token_out(
             &global_config,
-            amm_fee_config.as_ref(),
+            &amm_fee_config,
             AmmQuoteSource::Pool {
                 pool: &pool,
                 base_reserve,
                 quote_reserve,
-                virtual_quote_reserves: pool.virtual_quote_reserves,
                 base_mint_supply: base_supply,
             },
             target_amount,
@@ -535,6 +531,8 @@ async fn run_create_coin_then_trade_tx_sell(
             mayhem_mode,
             cashback,
             quote_mint: Pubkey::default(),
+            quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            creator_fee_bps: 0,
             global: &global,
             token_amount,
             max_quote_tokens: max_sol_cost,
@@ -545,7 +543,8 @@ async fn run_create_coin_then_trade_tx_sell(
     println!("[create_coin] create+buy sig: {create_sig}");
 
     if tokenized_agent_buyback_bps.is_some() {
-        let token_agent_payments_pda = pda::pump_agent_payments::token_agent_payments(&mint.pubkey()).0;
+        let token_agent_payments_pda =
+            pda::pump_agent_payments::token_agent_payments(&mint.pubkey()).0;
         let acct = rpc
             .get_account(&token_agent_payments_pda)
             .await
@@ -608,6 +607,11 @@ async fn run_create_coin_then_trade_tx_sell(
     assert!(!bc.complete, "fresh mint should not graduate from one buy");
 }
 
+// Cashback coins can no longer be created (`CashbackDeprecated`) and the
+// agent-payments program refuses `agent_initialize`
+// (`AgentInitializationNotSupported`), so the `cashback = true` and
+// `tokenized_agent_buyback_bps = Some(..)` variants are gone; both flags stay
+// on `CreateCoinParams` for older deployments.
 #[tokio::test]
 #[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
 async fn create_coin_then_trade_tx_sell() {
@@ -618,34 +622,4 @@ async fn create_coin_then_trade_tx_sell() {
 #[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
 async fn create_coin_mayhem_then_trade_tx_sell() {
     run_create_coin_then_trade_tx_sell(true, false, None).await;
-}
-
-#[tokio::test]
-#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
-async fn create_coin_cashback_then_trade_tx_sell() {
-    run_create_coin_then_trade_tx_sell(false, true, None).await;
-}
-
-#[tokio::test]
-#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
-async fn create_coin_mayhem_and_cashback_then_trade_tx_sell() {
-    run_create_coin_then_trade_tx_sell(true, true, None).await;
-}
-
-#[tokio::test]
-#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
-async fn create_coin_with_tokenized_agent_then_trade_tx_sell() {
-    run_create_coin_then_trade_tx_sell(false, false, Some(5000)).await;
-}
-
-#[tokio::test]
-#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
-async fn create_coin_cashback_with_tokenized_agent_then_trade_tx_sell() {
-    run_create_coin_then_trade_tx_sell(false, true, Some(2500)).await;
-}
-
-#[tokio::test]
-#[ignore = "requires `cargo run --features local-validator --bin local-validator` running"]
-async fn create_coin_mayhem_with_tokenized_agent_then_trade_tx_sell() {
-    run_create_coin_then_trade_tx_sell(true, false, Some(10000)).await;
 }

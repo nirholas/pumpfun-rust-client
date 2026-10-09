@@ -1,4 +1,4 @@
-use solana_program::instruction::Instruction;
+use anchor_lang::solana_program::instruction::Instruction;
 
 use crate::constants;
 use crate::math::QuoteResult;
@@ -195,7 +195,6 @@ impl PumpSdk {
                 pool: p.pool_state,
                 base_reserve: p.base_reserve,
                 quote_reserve: p.quote_reserve,
-                virtual_quote_reserves: p.virtual_quote_reserves,
                 base_mint_supply,
             };
             Some(if is_buy {

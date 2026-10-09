@@ -42,6 +42,31 @@ pub fn pump_programs_to_add() -> Vec<ProgramsToAdd> {
             name: "pump_agent_payments".into(),
             program_id: PUMP_AGENT_PAYMENTS_PROGRAM_ID,
         },
+        ProgramsToAdd {
+            name: "terminal_proxy".into(),
+            program_id: solana_program::pubkey!("term9YPb9mzAsABaqN71A4xdbxHmpBNZavpBiQKZzN3"),
+        },
+        // Routes SOL <-> USDC <-> token for non-SOL-quote bonding curves and
+        // pump_amm pools (see `programs/pump-stables-router`). Required for
+        // any local-validator test that exercises USDC-quoted trades.
+        ProgramsToAdd {
+            name: "pump_stables_router".into(),
+            program_id: solana_program::pubkey!("6Vo3245eszAb5wuqEMw8mGdbfRUdKbHhDHP5LcaGuTAB"),
+        },
+        // OpenBook DEX — the orderbook venue that the Raydium V4 SOL/USDC
+        // pool CPIs into when its swap takes the hybrid AMM+orderbook path.
+        // Mainnet-only.
+        ProgramsToAdd {
+            name: "serum_dex".into(),
+            program_id: solana_program::pubkey!("srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX"),
+        },
+        // Raydium AMM V4 — the program that owns the SOL/USDC pool the
+        // stables router CPIs into. Mainnet-only (devnet uses a different
+        // program ID; the router pins the mainnet authority anyway).
+        ProgramsToAdd {
+            name: "raydium_amm_v4".into(),
+            program_id: solana_program::pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"),
+        },
     ]
 }
 

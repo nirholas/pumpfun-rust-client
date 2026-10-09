@@ -6,8 +6,11 @@
 //! `spl-associated-token-account` so all token-instruction imports live
 //! in one place.
 
+// solana-program 2.3 deprecates `system_instruction` in favour of the
+// `solana-system-interface` crate, which is not a direct dependency here.
+#[allow(deprecated)]
+use anchor_lang::solana_program::{instruction::Instruction, pubkey::Pubkey, system_instruction};
 use anchor_spl::token::spl_token::instruction::{close_account, sync_native};
-use solana_program::{instruction::Instruction, pubkey::Pubkey, system_instruction};
 
 pub use anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 

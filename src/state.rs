@@ -2,13 +2,15 @@ use crate::account_wrapper::AccountWrapper;
 
 // `SharingConfig` is re-exported unwrapped because the IDL-generated struct
 // does not derive `Default`, so it cannot satisfy `AccountWrapper`'s
-// `AccountDeserialize` bound. Same for `pump_amm::SharingConfig` below.
-pub use crate::pump::accounts::SharingConfig;
+// `AccountDeserialize` bound. Same for `pump_amm::SharingConfig` below, and
+// for `QuoteControl` (its `_reserved: [u8; 64]` has no `Default`).
 pub(crate) use crate::pump::accounts::{
     BondingCurve as BondingCurveFromIdl, FeeConfig as FeeConfigFromIdl, Global as GlobalFromIdl,
     GlobalVolumeAccumulator as GlobalVolumeAccumulatorFromIdl,
     UserVolumeAccumulator as UserVolumeAccumulatorFromIdl,
 };
+pub use crate::pump::accounts::{QuoteControl, SharingConfig};
+pub use crate::pump::types::QuoteControlMint;
 
 pub type BondingCurve = AccountWrapper<BondingCurveFromIdl>;
 pub type FeeConfig = AccountWrapper<FeeConfigFromIdl>;

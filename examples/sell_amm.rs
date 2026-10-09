@@ -26,7 +26,8 @@ async fn main() {
     let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
     let quote_mint = constants::NATIVE_MINT;
     let max_sol_cost = LAMPORTS_PER_SOL;
-    let base_amount = 1_000_000u64;
+    // Large enough that the sell's creator fee is non-zero (see `buy_amm_instruction`).
+    let base_amount = 1_000_000_000u64;
 
     airdrop_blocking(&rpc, &user.pubkey(), DEFAULT_USER_LAMPORTS).await;
     let alt = load_alt(&rpc, constants::DEVNET_ALT).await;

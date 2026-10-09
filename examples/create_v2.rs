@@ -28,8 +28,10 @@ async fn main() {
             "https://example.com/ex.json",
             user.pubkey(),
             Pubkey::default(),
+            constants::SPL_TOKEN_PROGRAM_ID,
             false,
             false,
+            0,
         ),
     ];
     let sig = send_v0_tx(&rpc, &ixs, &user, &[&user, &mint], &alt).await;

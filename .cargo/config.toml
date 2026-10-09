@@ -1,0 +1,5 @@
+# Company-standard secure Cargo configuration.
+# Require a minimum publish age before a newly published crate version is used,
+# reducing exposure to malicious just-published dependency versions.
+[registry]
+global-min-publish-age = "7 days"

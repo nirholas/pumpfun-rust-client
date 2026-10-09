@@ -1,6 +1,6 @@
 //! Error type for the offline `PumpSdk` and the async `AsyncPumpClient`.
 
-use solana_program::pubkey::Pubkey;
+use anchor_lang::solana_program::pubkey::Pubkey;
 
 #[derive(Debug)]
 pub enum PumpClientError {
@@ -12,6 +12,8 @@ pub enum PumpClientError {
     Rpc(Box<solana_client::client_error::ClientError>),
     /// Required account did not exist on chain.
     AccountNotFound { name: &'static str, address: Pubkey },
+    /// Quote math rejected the trade (route or reserve problem).
+    Quote(crate::math::QuoteError),
 }
 
 impl std::fmt::Display for PumpClientError {
@@ -23,6 +25,7 @@ impl std::fmt::Display for PumpClientError {
             Self::AccountNotFound { name, address } => {
                 write!(f, "account not found ({name}): {address}")
             }
+            Self::Quote(e) => write!(f, "quote error: {e}"),
         }
     }
 }
@@ -34,7 +37,14 @@ impl std::error::Error for PumpClientError {
             #[cfg(feature = "client")]
             Self::Rpc(e) => Some(&**e),
             Self::AccountNotFound { .. } => None,
+            Self::Quote(e) => Some(e),
         }
+    }
+}
+
+impl From<crate::math::QuoteError> for PumpClientError {
+    fn from(e: crate::math::QuoteError) -> Self {
+        Self::Quote(e)
     }
 }
 

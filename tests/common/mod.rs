@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account_idempotent;
+use anchor_spl::token::spl_token;
 use anchor_spl::token::spl_token::instruction::{close_account, sync_native};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::address_lookup_table::state::AddressLookupTable;
@@ -27,22 +28,29 @@ use solana_sdk::instruction::Instruction;
 use solana_sdk::message::{v0, VersionedMessage};
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{Keypair, Signature, Signer};
+use solana_sdk::signature::{read_keypair_file, Keypair, Signature, Signer};
+#[allow(deprecated)]
 use solana_sdk::system_instruction;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 
 use pump_rust_client::{constants, pda, AsyncPumpClient};
 
-/// Local validator RPC URL. Tests panic if it isn't reachable —
-/// `cargo run --features local-validator --bin local-validator` must be
-/// running in another shell.
+/// Default local validator RPC URL; `PUMP_LOCAL_RPC` overrides it (pair with
+/// `PUMP_LOCAL_RPC_PORT` on the validator). Tests panic if it isn't
+/// reachable — `cargo run --features local-validator --bin local-validator`
+/// must be running in another shell.
 pub const LOCAL_RPC: &str = "http://127.0.0.1:8899";
+
+/// The RPC URL the tests and examples use: `PUMP_LOCAL_RPC` or [`LOCAL_RPC`].
+pub fn local_rpc_url() -> String {
+    std::env::var("PUMP_LOCAL_RPC").unwrap_or_else(|_| LOCAL_RPC.to_string())
+}
 
 /// Fresh `RpcClient` pointed at the local validator with `confirmed`
 /// commitment. Cheap to call once per test.
 pub fn make_rpc() -> Arc<RpcClient> {
     Arc::new(RpcClient::new_with_commitment(
-        LOCAL_RPC.to_string(),
+        local_rpc_url(),
         CommitmentConfig::confirmed(),
     ))
 }
@@ -125,10 +133,25 @@ pub async fn load_alt(rpc: &RpcClient, key: Pubkey) -> AddressLookupTableAccount
     }
 }
 
-/// Pack `ixs` into a v0 versioned tx using `alt`, sign with `signers`,
-/// and send + confirm. Logs the serialized tx size for diagnostics
-/// (1232-byte limit; failures here are usually a missing ALT entry or
-/// an oversize instruction list).
+/// Pack `ixs` into a v0 versioned tx using `alt` and sign with `signers`
+/// (1232-byte limit; failures here are usually a missing ALT entry or an
+/// oversize instruction list). Simulate it, or send it via [`send_v0_tx`].
+pub async fn build_v0_tx(
+    rpc: &RpcClient,
+    ixs: &[Instruction],
+    payer: &Keypair,
+    signers: &[&Keypair],
+    alt: &AddressLookupTableAccount,
+) -> VersionedTransaction {
+    let blockhash = rpc.get_latest_blockhash().await.expect("latest_blockhash");
+    let msg = v0::Message::try_compile(&payer.pubkey(), ixs, std::slice::from_ref(alt), blockhash)
+        .expect("compile v0 message");
+    let signers_dyn: Vec<&dyn Signer> = signers.iter().map(|kp| *kp as &dyn Signer).collect();
+    VersionedTransaction::try_new(VersionedMessage::V0(msg), &signers_dyn)
+        .expect("sign versioned tx")
+}
+
+/// [`build_v0_tx`] then send + confirm.
 pub async fn send_v0_tx(
     rpc: &RpcClient,
     ixs: &[Instruction],
@@ -136,15 +159,53 @@ pub async fn send_v0_tx(
     signers: &[&Keypair],
     alt: &AddressLookupTableAccount,
 ) -> Signature {
-    let blockhash = rpc.get_latest_blockhash().await.expect("latest_blockhash");
-    let msg = v0::Message::try_compile(&payer.pubkey(), ixs, std::slice::from_ref(alt), blockhash)
-        .expect("compile v0 message");
-    let signers_dyn: Vec<&dyn Signer> = signers.iter().map(|kp| *kp as &dyn Signer).collect();
-    let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), &signers_dyn)
-        .expect("sign versioned tx");
+    let tx = build_v0_tx(rpc, ixs, payer, signers, alt).await;
     rpc.send_and_confirm_transaction(&tx)
         .await
         .expect("send_and_confirm_transaction — check local-validator logs for program error")
+}
+
+/// Create the user's test-USDC ATA and mint `amount` raw units (6 decimals)
+/// into it; the synthesized mint's authority keypair from `keys/` co-signs.
+/// Returns the ATA.
+pub async fn fund_test_usdc(rpc: &RpcClient, user: &Keypair, amount: u64) -> Pubkey {
+    let authority = read_keypair_file(fixtures::USDC_QUOTE_MINT_AUTHORITY_KEYPAIR_PATH)
+        .expect("read USDC_QUOTE_MINT_AUTHORITY keypair");
+    assert_eq!(
+        authority.pubkey(),
+        fixtures::USDC_QUOTE_MINT_AUTHORITY,
+        "USDC_QUOTE_MINT_AUTHORITY constant must match the on-disk keypair file"
+    );
+    let token_program = constants::SPL_TOKEN_PROGRAM_ID;
+    let ata = pda::associated_token(&user.pubkey(), &token_program, &fixtures::USDC_QUOTE_MINT).0;
+    let ixs = [
+        create_associated_token_account_idempotent(
+            &user.pubkey(),
+            &user.pubkey(),
+            &fixtures::USDC_QUOTE_MINT,
+            &token_program,
+        ),
+        spl_token::instruction::mint_to(
+            &token_program,
+            &fixtures::USDC_QUOTE_MINT,
+            &ata,
+            &authority.pubkey(),
+            &[],
+            amount,
+        )
+        .expect("mint_to ix"),
+    ];
+    let blockhash = rpc.get_latest_blockhash().await.expect("latest_blockhash");
+    let tx = Transaction::new_signed_with_payer(
+        &ixs,
+        Some(&user.pubkey()),
+        &[user, &authority],
+        blockhash,
+    );
+    rpc.send_and_confirm_transaction(&tx)
+        .await
+        .expect("fund_test_usdc");
+    ata
 }
 
 /// Convenience wrapper around `pda::associated_token` for the user's

@@ -1,7 +1,8 @@
-use solana_program::pubkey::Pubkey;
+use anchor_lang::solana_program::pubkey::Pubkey;
 
 use crate::math::amm::{
-    self as amm_math, AmmContext, BuyBaseInputResult, BuyQuoteInputResult, SellBaseInputResult,
+    self as amm_math, effective_quote_reserve, real_quote_reserve, AmmContext, BuyBaseInputResult,
+    BuyQuoteInputResult, SellBaseInputResult,
 };
 use crate::math::bonding_curve as bc_math;
 use crate::math::utils::{add_slippage, sub_slippage};
@@ -12,9 +13,13 @@ use crate::state::pump_amm::{GlobalConfig, Pool};
 use crate::state::{BondingCurve, FeeConfig, Global};
 
 mod pump_amm_ix;
+mod pump_fees_ix;
 mod pump_legacy;
 mod pump_v2;
+mod pump_v3;
 mod trade_tx;
+
+pub use pump_amm_ix::MultiHopHop;
 
 /// Quote output: `amount` is tokens-out or lamports-out; `min_out` / `max_input` carry slippage where relevant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,16 +49,8 @@ pub enum TradeVenue<'a> {
 pub enum AmmQuoteSource<'a> {
     Pool {
         pool: &'a Pool,
-        /// Raw `pool_base_token_account.amount`. Unchanged by the virtual
-        /// quote reserves work: the base side is always the raw vault balance.
         base_reserve: u64,
-        /// Raw `pool_quote_token_account.amount`. NOT the effective reserve:
-        /// supply `virtual_quote_reserves` separately and the math adds them.
         quote_reserve: u64,
-        /// `pool.virtual_quote_reserves`. Read it off the decoded [`Pool`]
-        /// rather than hardcoding `0`: boost pools carry a non-zero value
-        /// and pricing off the raw vault balance misprices them silently.
-        virtual_quote_reserves: i128,
         base_mint_supply: u64,
     },
     BondingCurveComplete {
@@ -62,6 +59,47 @@ pub enum AmmQuoteSource<'a> {
         base_mint: &'a Pubkey,
         base_mint_supply: u64,
     },
+}
+
+/// One venue of a `multi_hop_swap` route with the pre-trade state it is priced on.
+#[derive(Clone, Copy, Debug)]
+pub enum RouteHop<'a> {
+    Pool {
+        pool: &'a Pool,
+        base_reserve: u64,
+        quote_vault_balance: u64,
+        base_mint_supply: u64,
+    },
+    /// A bonding curve; `base_ata_amount` is the curve's base ATA balance.
+    Curve {
+        mint: Pubkey,
+        bonding_curve: &'a BondingCurve,
+        base_token_program: Pubkey,
+        quote_token_program: Pubkey,
+        mint_supply: u64,
+        base_ata_amount: u64,
+    },
+}
+
+impl RouteHop<'_> {
+    /// The hop's account group for [`PumpSdk::multi_hop_swap_instruction`].
+    pub fn accounts(&self) -> MultiHopHop {
+        match *self {
+            Self::Pool { pool, .. } => MultiHopHop::pool(pool),
+            Self::Curve {
+                mint,
+                bonding_curve,
+                base_token_program,
+                quote_token_program,
+                ..
+            } => MultiHopHop::curve(
+                mint,
+                bonding_curve.quote_mint,
+                base_token_program,
+                quote_token_program,
+            ),
+        }
+    }
 }
 
 /// [`PumpSdk::trade_tx_instructions_with_venue`] parameters. wSOL uses wrap/unwrap;
@@ -107,15 +145,10 @@ pub struct TradeTxParams<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct PumpPoolQuoteCtx<'a> {
     pub amm_global: &'a GlobalConfig,
-    pub amm_fee_config: Option<&'a FeeConfig>,
+    pub amm_fee_config: &'a FeeConfig,
     pub pool_state: &'a Pool,
-    /// Raw `pool_base_token_account.amount`.
     pub base_reserve: u64,
-    /// Raw `pool_quote_token_account.amount`, never pre-summed with
-    /// `virtual_quote_reserves`.
     pub quote_reserve: u64,
-    /// `pool_state.virtual_quote_reserves`.
-    pub virtual_quote_reserves: i128,
 }
 
 /// [`PumpSdk::quote_trade`] parameters: routes from [`BondingCurve::complete`], mirroring
@@ -127,7 +160,7 @@ pub struct TradeQuoteParams<'a> {
     pub slippage_bps: u16,
     pub base_mint_supply: u64,
     pub pump_global: &'a Global,
-    pub pump_fee_config: Option<&'a FeeConfig>,
+    pub pump_fee_config: &'a FeeConfig,
     pub bonding_curve: &'a BondingCurve,
     pub pump_pool: Option<PumpPoolQuoteCtx<'a>>,
 }
@@ -138,7 +171,9 @@ pub struct TradeQuoteParams<'a> {
 /// `tokenized_agent_buyback_bps`: when `Some(bps)`, an `agent_initialize`
 /// instruction (pump_agent_payments) is appended that registers `creator` as
 /// the agent payment authority with the given buyback rate (basis points;
-/// must be ≤ 10000). `None` skips it.
+/// must be ≤ 10000). `None` skips it. The current program refuses it
+/// (`AgentInitializationNotSupported`), so leave it `None` unless targeting a
+/// deployment that still admits new agents.
 #[derive(Clone, Debug)]
 pub struct CreateCoinParams<'a> {
     pub mint: Pubkey,
@@ -150,6 +185,10 @@ pub struct CreateCoinParams<'a> {
     pub mayhem_mode: bool,
     pub cashback: bool,
     pub quote_mint: Pubkey,
+    /// Program owning `quote_mint` (SPL Token or Token-2022). Ignored for SOL.
+    pub quote_token_program: Pubkey,
+    /// Per-coin creator fee rate; 0 = pump-fees schedule rate.
+    pub creator_fee_bps: u64,
     pub global: &'a Global,
     pub token_amount: u64,
     pub max_quote_tokens: u64,
@@ -250,7 +289,7 @@ impl PumpSdk {
 
     fn map_amm_quote_source<R>(
         global_config: &GlobalConfig,
-        fee_config: Option<&FeeConfig>,
+        fee_config: &FeeConfig,
         source: AmmQuoteSource<'_>,
         with: impl FnOnce(AmmContext<'_>) -> QuoteResult<R>,
     ) -> QuoteResult<R> {
@@ -259,7 +298,6 @@ impl PumpSdk {
                 pool,
                 base_reserve,
                 quote_reserve,
-                virtual_quote_reserves,
                 base_mint_supply,
             } => {
                 let ctx = AmmContext {
@@ -268,10 +306,13 @@ impl PumpSdk {
                     base_mint: &pool.base_mint,
                     pool_creator: &pool.creator,
                     coin_creator: &pool.coin_creator,
+                    quote_mint: &pool.quote_mint,
+                    creator_fee_bps: pool.creator_fee_bps,
                     base_reserve,
-                    quote_reserve,
-                    virtual_quote_reserves,
-                    base_mint_supply,
+                    quote_reserve: effective_quote_reserve(pool, quote_reserve)?,
+                    base_mint_supply: fee_tier_supply(pool.is_mayhem_mode, base_mint_supply),
+                    // Un-swept fee buckets sit in the vault but are not liquidity.
+                    real_quote_reserve: real_quote_reserve(pool, quote_reserve)?,
                 };
                 with(ctx)
             }
@@ -289,19 +330,17 @@ impl PumpSdk {
                     base_mint,
                     pool_creator: &pool_creator_pk,
                     coin_creator: &bonding_curve.creator,
+                    quote_mint: &bonding_curve.quote_mint,
+                    // A migrated pool inherits the curve's configured creator rate.
+                    creator_fee_bps: bonding_curve.creator_fee_bps,
                     base_reserve,
                     quote_reserve,
-                    // This branch estimates reserves from a completed curve
-                    // whose AMM pool has not been read (and may not exist
-                    // yet), so there is no `Pool::virtual_quote_reserves` to
-                    // read. Zero is the correct value here rather than a
-                    // silent default: the migrated pool is seeded from the
-                    // curve's real quote reserves, and any virtual component
-                    // is applied by a later `init_boost`. Once the pool
-                    // account exists, quote through `AmmQuoteSource::Pool`,
-                    // which carries the real field.
-                    virtual_quote_reserves: 0,
-                    base_mint_supply,
+                    base_mint_supply: fee_tier_supply(
+                        bonding_curve.is_mayhem_mode,
+                        base_mint_supply,
+                    ),
+                    // A freshly migrated pool has no boost, so effective == real.
+                    real_quote_reserve: quote_reserve,
                 };
                 with(ctx)
             }
@@ -312,7 +351,7 @@ impl PumpSdk {
     pub fn buy_quote_bonding_curve_sol_in(
         &self,
         global: &Global,
-        fee_config: Option<&FeeConfig>,
+        fee_config: &FeeConfig,
         bonding_curve: &BondingCurve,
         mint_supply: u64,
         sol_amount: u64,
@@ -325,10 +364,24 @@ impl PumpSdk {
             mint_supply,
             sol_amount,
         )?;
+        // Partial fill: the program re-prices the remaining supply and charges
+        // only that (plus fees on it), so the budget is an upper bound.
+        let input_amount_used = if tokens_out > 0 && tokens_out >= bonding_curve.real_token_reserves
+        {
+            bc_math::buy_sol_amount_from_token_amount(
+                global,
+                fee_config,
+                bonding_curve,
+                mint_supply,
+                tokens_out,
+            )?
+        } else {
+            sol_amount
+        };
         Ok(Quote {
             amount: tokens_out,
             min_out: sub_slippage(tokens_out, slippage_bps),
-            input_amount_used: sol_amount,
+            input_amount_used,
             max_input: sol_amount,
         })
     }
@@ -337,7 +390,7 @@ impl PumpSdk {
     pub fn buy_quote_bonding_curve_token_out(
         &self,
         global: &Global,
-        fee_config: Option<&FeeConfig>,
+        fee_config: &FeeConfig,
         bonding_curve: &BondingCurve,
         mint_supply: u64,
         token_amount: u64,
@@ -350,11 +403,143 @@ impl PumpSdk {
             mint_supply,
             token_amount,
         )?;
+        // The program fills at most the remaining supply; promise no more.
+        let tokens = token_amount.min(bonding_curve.real_token_reserves);
         Ok(Quote {
             amount: sol_cost,
-            min_out: token_amount,
-            input_amount_used: token_amount,
+            min_out: tokens,
+            input_amount_used: tokens,
             max_input: add_slippage(sol_cost, slippage_bps),
+        })
+    }
+
+    /// v3 bonding curve buy: quote in → tokens out; past the remaining supply the
+    /// leftover budget buys from the pool-to-be (`base_ata_amount` = the curve's base
+    /// ATA balance). `input_amount_used` is what the program charges.
+    #[allow(clippy::too_many_arguments)]
+    pub fn buy_quote_bonding_curve_v3_sol_in(
+        &self,
+        global: &Global,
+        fee_config: &FeeConfig,
+        bonding_curve: &BondingCurve,
+        mint_supply: u64,
+        base_ata_amount: u64,
+        sol_amount: u64,
+        slippage_bps: u16,
+    ) -> QuoteResult<Quote> {
+        let (tokens_out, input_amount_used) = bc_math::buy_v3_token_amount_from_sol_amount(
+            global,
+            fee_config,
+            bonding_curve,
+            mint_supply,
+            base_ata_amount,
+            sol_amount,
+        )?;
+        Ok(Quote {
+            amount: tokens_out,
+            min_out: sub_slippage(tokens_out, slippage_bps),
+            input_amount_used,
+            max_input: sol_amount,
+        })
+    }
+
+    /// v3 bonding curve buy: fixed token out → quote cost, the post-completion leg
+    /// included past the remaining supply (a mayhem curve fills only the remainder).
+    #[allow(clippy::too_many_arguments)]
+    pub fn buy_quote_bonding_curve_v3_token_out(
+        &self,
+        global: &Global,
+        fee_config: &FeeConfig,
+        bonding_curve: &BondingCurve,
+        mint_supply: u64,
+        base_ata_amount: u64,
+        token_amount: u64,
+        slippage_bps: u16,
+    ) -> QuoteResult<Quote> {
+        let sol_cost = bc_math::buy_v3_sol_amount_from_token_amount(
+            global,
+            fee_config,
+            bonding_curve,
+            mint_supply,
+            base_ata_amount,
+            token_amount,
+        )?;
+        let tokens = if bonding_curve.is_mayhem_mode {
+            token_amount.min(bonding_curve.real_token_reserves)
+        } else {
+            token_amount
+        };
+        Ok(Quote {
+            amount: sol_cost,
+            min_out: tokens,
+            input_amount_used: tokens,
+            max_input: add_slippage(sol_cost, slippage_bps),
+        })
+    }
+
+    /// `multi_hop_swap` output for `amount_in` of `in_mint` along `hops`, each hop
+    /// priced on its pre-trade state; `min_out` is at least 1 (the program requires it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn quote_multi_hop_swap(
+        &self,
+        global: &Global,
+        pump_fee_config: &FeeConfig,
+        global_config: &GlobalConfig,
+        amm_fee_config: &FeeConfig,
+        user: &Pubkey,
+        in_mint: Pubkey,
+        hops: &[RouteHop<'_>],
+        amount_in: u64,
+        slippage_bps: u16,
+    ) -> QuoteResult<Quote> {
+        if amount_in == 0 {
+            return Err(QuoteError::ZeroAmount);
+        }
+        let keys: Vec<MultiHopHop> = hops.iter().map(RouteHop::accounts).collect();
+        let (is_buy, _) = Self::multi_hop_route(in_mint, &keys)?;
+        let mut amount = amount_in;
+        for (i, hop) in hops.iter().enumerate() {
+            let legs = amm_math::HopFees::for_hop(is_buy, i, hops.len());
+            amount = match *hop {
+                RouteHop::Pool {
+                    pool,
+                    base_reserve,
+                    quote_vault_balance,
+                    base_mint_supply,
+                } => amm_math::multi_hop_pool_hop(
+                    global_config,
+                    amm_fee_config,
+                    pool,
+                    base_reserve,
+                    quote_vault_balance,
+                    base_mint_supply,
+                    is_buy,
+                    amount,
+                    legs,
+                )?,
+                RouteHop::Curve {
+                    bonding_curve,
+                    mint_supply,
+                    base_ata_amount,
+                    ..
+                } => bc_math::multi_hop_curve_hop(
+                    global,
+                    pump_fee_config,
+                    bonding_curve,
+                    mint_supply,
+                    base_ata_amount,
+                    user,
+                    is_buy,
+                    amount,
+                    legs.curve_flags(),
+                )?,
+            };
+        }
+        Ok(Quote {
+            amount,
+            min_out: sub_slippage(amount, slippage_bps).max(1),
+            input_amount_used: amount_in,
+            max_input: amount_in,
         })
     }
 
@@ -362,7 +547,7 @@ impl PumpSdk {
     pub fn sell_quote_bonding_curve(
         &self,
         global: &Global,
-        fee_config: Option<&FeeConfig>,
+        fee_config: &FeeConfig,
         bonding_curve: &BondingCurve,
         mint_supply: u64,
         token_amount: u64,
@@ -387,7 +572,7 @@ impl PumpSdk {
     pub fn buy_quote_amm_sol_in(
         &self,
         global_config: &GlobalConfig,
-        fee_config: Option<&FeeConfig>,
+        fee_config: &FeeConfig,
         source: AmmQuoteSource<'_>,
         sol_amount: u64,
         slippage_bps: u16,
@@ -409,7 +594,7 @@ impl PumpSdk {
     pub fn buy_quote_amm_token_out(
         &self,
         global_config: &GlobalConfig,
-        fee_config: Option<&FeeConfig>,
+        fee_config: &FeeConfig,
         source: AmmQuoteSource<'_>,
         token_amount: u64,
         slippage_bps: u16,
@@ -430,7 +615,7 @@ impl PumpSdk {
     pub fn sell_quote_amm(
         &self,
         global_config: &GlobalConfig,
-        fee_config: Option<&FeeConfig>,
+        fee_config: &FeeConfig,
         source: AmmQuoteSource<'_>,
         token_amount: u64,
         slippage_bps: u16,
@@ -449,15 +634,35 @@ impl PumpSdk {
     }
 }
 
-/// Heuristic AMM reserves from a completed curve (not live pool state).
+/// Supply used for the fee-tier market cap: mayhem coins price off the fixed
+/// total supply, not the live mint supply. Mirrors `Pool::market_cap`.
+fn fee_tier_supply(is_mayhem_mode: bool, base_mint_supply: u64) -> u64 {
+    if is_mayhem_mode {
+        crate::math::bonding_curve::TOKEN_SUPPLY as u64
+    } else {
+        base_mint_supply
+    }
+}
+
+/// Reserves `migrate_v2` deposits for a completed curve: the base ATA balance (the
+/// unsold supply less the completing buy's `post_complete_base_out`), and the raised
+/// quote plus `post_complete_quote_in`, less `pool_migration_fee` on a SOL curve only
+/// (a token-quoted migration is paid for by the migrator).
 fn estimated_reserves(global: &Global, bonding_curve: &BondingCurve) -> QuoteResult<(u64, u64)> {
-    let base_reserve = global
+    let base_reserve = bonding_curve
         .token_total_supply
         .checked_sub(global.initial_real_token_reserves)
+        .and_then(|base| base.checked_sub(bonding_curve.post_complete_base_out))
         .ok_or(QuoteError::EmptyReserves)?;
+    let migration_fee = if crate::math::fees::is_sol_like_quote_mint(&bonding_curve.quote_mint) {
+        global.pool_migration_fee
+    } else {
+        0
+    };
     let quote_reserve = bonding_curve
         .real_quote_reserves
-        .checked_sub(global.pool_migration_fee)
+        .checked_add(bonding_curve.post_complete_quote_in)
+        .and_then(|raised| raised.checked_sub(migration_fee))
         .ok_or(QuoteError::EmptyReserves)?;
     if base_reserve == 0 || quote_reserve == 0 {
         return Err(QuoteError::EmptyReserves);
@@ -468,8 +673,9 @@ fn estimated_reserves(global: &Global, bonding_curve: &BondingCurve) -> QuoteRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anchor_lang::solana_program::pubkey::Pubkey;
+    use anchor_lang::system_program;
     use anchor_lang::Discriminator;
-    use solana_program::{pubkey, pubkey::Pubkey, system_program};
 
     use crate::constants;
     use crate::math::amm::AmmContext;
@@ -484,6 +690,7 @@ mod tests {
         Pubkey::new_from_array([seed; 32])
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     fn pump_global_with_fees(fee_recipient: Pubkey, buyback_fee_recipient: Pubkey) -> Global {
         let mut g = Global::default();
         g.fee_recipient = fee_recipient;
@@ -525,7 +732,10 @@ mod tests {
         assert!(metas.contains(&constants::MPL_TOKEN_METADATA_PROGRAM_ID));
         assert!(metas.contains(&constants::SPL_TOKEN_PROGRAM_ID));
         assert!(metas.contains(&pda::pump::bonding_curve(&mint).0));
-        assert!(metas.contains(&solana_program::sysvar::rent::ID));
+        // Rent sysvar id (path differs across anchor/solana majors, so use the literal).
+        assert!(metas.contains(&Pubkey::from_str_const(
+            "SysvarRent111111111111111111111111111111111"
+        )));
     }
 
     #[test]
@@ -543,8 +753,10 @@ mod tests {
             "https://example.com/metadata.json",
             creator,
             Pubkey::default(),
+            constants::SPL_TOKEN_PROGRAM_ID,
             false,
             false,
+            0,
         );
 
         assert_eq!(ix.program_id, crate::pump::ID);
@@ -577,8 +789,10 @@ mod tests {
             "https://example.com/metadata.json",
             creator,
             Pubkey::default(),
+            constants::SPL_TOKEN_PROGRAM_ID,
             false,
             false,
+            0,
         );
         let ix = sdk.create_v2_instruction(
             mint,
@@ -588,16 +802,31 @@ mod tests {
             "https://example.com/metadata.json",
             creator,
             quote_mint,
+            constants::SPL_TOKEN_2022_PROGRAM_ID,
             false,
             false,
+            250,
         );
 
-        assert_eq!(ix.accounts.len(), baseline.accounts.len() + 3);
+        // Trailing bytes are the EOF-tolerant `creator_fee_bps: OptionU64`
+        // followed by `is_holder_reward: OptionBool` (always false here).
+        let n = ix.data.len();
+        assert_eq!(&ix.data[n - 9..n - 1], &250u64.to_le_bytes());
+        assert_eq!(ix.data[n - 1], 0);
+        let n = baseline.data.len();
+        assert_eq!(&baseline.data[n - 9..n - 1], &0u64.to_le_bytes());
+        assert_eq!(baseline.data[n - 1], 0);
+
+        assert_eq!(ix.accounts.len(), baseline.accounts.len() + 4);
 
         let n = ix.accounts.len();
-        let quote_meta = &ix.accounts[n - 3];
-        let ata_meta = &ix.accounts[n - 2];
-        let token_program_meta = &ix.accounts[n - 1];
+        let quote_meta = &ix.accounts[n - 4];
+        let ata_meta = &ix.accounts[n - 3];
+        let token_program_meta = &ix.accounts[n - 2];
+        let quote_control_meta = &ix.accounts[n - 1];
+        assert_eq!(quote_control_meta.pubkey, pda::pump::quote_control().0);
+        assert!(!quote_control_meta.is_writable);
+        assert!(!quote_control_meta.is_signer);
 
         assert_eq!(quote_meta.pubkey, quote_mint);
         assert!(!quote_meta.is_writable);
@@ -606,7 +835,7 @@ mod tests {
         let bonding_curve = pda::pump::bonding_curve(&mint).0;
         let expected_ata = pda::associated_token(
             &bonding_curve,
-            &constants::SPL_TOKEN_PROGRAM_ID,
+            &constants::SPL_TOKEN_2022_PROGRAM_ID,
             &quote_mint,
         )
         .0;
@@ -614,7 +843,10 @@ mod tests {
         assert!(ata_meta.is_writable);
         assert!(!ata_meta.is_signer);
 
-        assert_eq!(token_program_meta.pubkey, constants::SPL_TOKEN_PROGRAM_ID);
+        assert_eq!(
+            token_program_meta.pubkey,
+            constants::SPL_TOKEN_2022_PROGRAM_ID
+        );
         assert!(!token_program_meta.is_writable);
         assert!(!token_program_meta.is_signer);
     }
@@ -634,8 +866,10 @@ mod tests {
             "https://example.com/metadata.json",
             creator,
             Pubkey::default(),
+            constants::SPL_TOKEN_PROGRAM_ID,
             false,
             false,
+            0,
         );
         let with_native = sdk.create_v2_instruction(
             mint,
@@ -645,8 +879,10 @@ mod tests {
             "https://example.com/metadata.json",
             creator,
             constants::NATIVE_MINT,
+            constants::SPL_TOKEN_PROGRAM_ID,
             false,
             false,
+            0,
         );
 
         assert_eq!(with_default.accounts.len(), with_native.accounts.len());
@@ -732,8 +968,10 @@ mod tests {
                 "https://example.com/metadata.json",
                 creator,
                 Pubkey::default(),
+                constants::SPL_TOKEN_PROGRAM_ID,
                 false,
                 false,
+                0,
                 None,
                 &global,
                 1_000,
@@ -741,20 +979,20 @@ mod tests {
             )
             .expect("create_v2_and_buy_instruction");
 
-        assert_eq!(ixs.len(), 6);
+        assert_eq!(ixs.len(), 3);
         assert_eq!(
             &ixs[0].data[..8],
             <client::args::CreateV2 as Discriminator>::DISCRIMINATOR,
         );
-        for i in 1..5 {
-            assert_eq!(ixs[i].data, vec![1], "expected SPL ATA idempotent ix");
+        for ix in &ixs[1..2] {
+            assert_eq!(ix.data, vec![1], "expected SPL ATA idempotent ix");
         }
         assert_eq!(
-            &ixs[5].data[..8],
+            &ixs[2].data[..8],
             <client::args::BuyV2 as Discriminator>::DISCRIMINATOR,
         );
 
-        let buy_metas: Vec<Pubkey> = ixs[5].accounts.iter().map(|m| m.pubkey).collect();
+        let buy_metas: Vec<Pubkey> = ixs[2].accounts.iter().map(|m| m.pubkey).collect();
         assert!(buy_metas.contains(&constants::SPL_TOKEN_2022_PROGRAM_ID));
         assert!(buy_metas.contains(&constants::SPL_TOKEN_PROGRAM_ID));
         assert!(buy_metas.contains(&constants::NATIVE_MINT));
@@ -867,9 +1105,9 @@ mod tests {
         let bonding_curve = pda::pump::bonding_curve(&base_mint).0;
         let expected_atas: [Pubkey; 4] = [
             pda::associated_token(&user, &base_token_program, &base_mint).0,
-            pda::associated_token(&bonding_curve, &quote_token_program, &quote_mint).0,
             pda::associated_token(&user, &quote_token_program, &quote_mint).0,
-            pda::associated_token(&buyback_fee_recipient, &quote_token_program, &quote_mint).0,
+            pda::associated_token(&creator, &quote_token_program, &quote_mint).0,
+            pda::associated_token(&bonding_curve, &quote_token_program, &quote_mint).0,
         ];
         for (i, expected) in expected_atas.iter().enumerate() {
             let metas: Vec<Pubkey> = ixs[i].accounts.iter().map(|m| m.pubkey).collect();
@@ -916,14 +1154,18 @@ mod tests {
         assert!(metas.contains(&pda::associated_token(&user, &token_program, &mint).0));
 
         let n = ix.accounts.len();
-        let uva = &ix.accounts[n - 2];
-        let bcv2 = &ix.accounts[n - 1];
+        let uva = &ix.accounts[n - 3];
+        let bcv2 = &ix.accounts[n - 2];
+        let buyback = &ix.accounts[n - 1];
         assert_eq!(uva.pubkey, pda::pump::user_volume_accumulator(&user).0);
         assert!(uva.is_writable);
         assert!(!uva.is_signer);
         assert_eq!(bcv2.pubkey, pda::pump::bonding_curve_v2(&mint).0);
         assert!(!bcv2.is_writable);
         assert!(!bcv2.is_signer);
+        assert_eq!(buyback.pubkey, buyback_fee_recipient);
+        assert!(buyback.is_writable);
+        assert!(!buyback.is_signer);
     }
 
     #[test]
@@ -952,10 +1194,15 @@ mod tests {
         let metas: Vec<Pubkey> = ix.accounts.iter().map(|m| m.pubkey).collect();
         assert!(!metas.contains(&pda::pump::user_volume_accumulator(&user).0));
 
-        let bcv2 = &ix.accounts[ix.accounts.len() - 1];
+        let n = ix.accounts.len();
+        let bcv2 = &ix.accounts[n - 2];
+        let buyback = &ix.accounts[n - 1];
         assert_eq!(bcv2.pubkey, pda::pump::bonding_curve_v2(&mint).0);
         assert!(!bcv2.is_writable);
         assert!(!bcv2.is_signer);
+        assert_eq!(buyback.pubkey, buyback_fee_recipient);
+        assert!(buyback.is_writable);
+        assert!(!buyback.is_signer);
     }
 
     #[test]
@@ -1032,7 +1279,6 @@ mod tests {
         let creator = fake_pubkey(124);
         let fee_recipient = fake_pubkey(125);
         let buyback_fee_recipient = fake_pubkey(126);
-        let base_token_program = constants::SPL_TOKEN_2022_PROGRAM_ID;
         let quote_token_program = constants::SPL_TOKEN_PROGRAM_ID;
         let global = pump_global_with_fees(fee_recipient, buyback_fee_recipient);
         let bonding_curve = BondingCurve::new(BondingCurveFromIdl {
@@ -1053,22 +1299,21 @@ mod tests {
             )
             .expect("sell_v2_instructions");
 
-        assert_eq!(ixs.len(), 5);
-        for ata_ix in &ixs[..4] {
+        assert_eq!(ixs.len(), 4);
+        for ata_ix in &ixs[..3] {
             assert_eq!(ata_ix.program_id, constants::SPL_ATA_PROGRAM_ID);
             assert_eq!(ata_ix.data, vec![1]);
         }
         assert_eq!(
-            &ixs[4].data[..8],
+            &ixs[3].data[..8],
             <client::args::SellV2 as Discriminator>::DISCRIMINATOR,
         );
 
         let bonding_curve = pda::pump::bonding_curve(&base_mint).0;
-        let expected_atas: [Pubkey; 4] = [
-            pda::associated_token(&user, &base_token_program, &base_mint).0,
-            pda::associated_token(&bonding_curve, &quote_token_program, &quote_mint).0,
+        let expected_atas: [Pubkey; 3] = [
             pda::associated_token(&user, &quote_token_program, &quote_mint).0,
-            pda::associated_token(&buyback_fee_recipient, &quote_token_program, &quote_mint).0,
+            pda::associated_token(&creator, &quote_token_program, &quote_mint).0,
+            pda::associated_token(&bonding_curve, &quote_token_program, &quote_mint).0,
         ];
         for (i, expected) in expected_atas.iter().enumerate() {
             let metas: Vec<Pubkey> = ixs[i].accounts.iter().map(|m| m.pubkey).collect();
@@ -1154,13 +1399,15 @@ mod tests {
         let buyback_meta = &ix.accounts[n - 2];
         let buyback_ata = &ix.accounts[n - 1];
 
+        // The cashback accumulator's ATA is in the pool's quote mint (the program
+        // checks it against `pool.quote_mint`), the same on buys and sells.
         let user_vol_accum = pda::pump_amm::user_volume_accumulator(&user).0;
         assert_eq!(
             cashback.pubkey,
             pda::associated_token(
                 &user_vol_accum,
                 &quote_token_program,
-                &constants::NATIVE_MINT,
+                &pool_state.quote_mint
             )
             .0
         );
@@ -1396,7 +1643,9 @@ mod tests {
     }
 
     /// Parses lamports from a system `transfer` instruction (tests).
-    fn parse_system_transfer_lamports(ix: &solana_program::instruction::Instruction) -> u64 {
+    fn parse_system_transfer_lamports(
+        ix: &anchor_lang::solana_program::instruction::Instruction,
+    ) -> u64 {
         assert_eq!(ix.program_id, system_program::ID);
         assert_eq!(ix.data.len(), 12);
         assert_eq!(&ix.data[..4], &2u32.to_le_bytes());
@@ -1435,21 +1684,19 @@ mod tests {
             })
             .expect("trade_tx_instructions");
 
-        assert_eq!(ixs.len(), 3);
-        for ata_ix in &ixs[..2] {
+        assert_eq!(ixs.len(), 2);
+        for ata_ix in &ixs[..1] {
             assert_eq!(ata_ix.program_id, constants::SPL_ATA_PROGRAM_ID);
             assert_eq!(ata_ix.data, vec![1]);
         }
-        assert_eq!(ixs[2].program_id, crate::pump::ID);
+        assert_eq!(ixs[1].program_id, crate::pump::ID);
         assert_eq!(
-            &ixs[2].data[..8],
+            &ixs[1].data[..8],
             <client::args::BuyV2 as Discriminator>::DISCRIMINATOR,
         );
 
-        let expected_atas: [Pubkey; 2] = [
-            pda::associated_token(&user, &constants::SPL_TOKEN_2022_PROGRAM_ID, &mint).0,
-            user_wsol_ata(&user),
-        ];
+        let expected_atas: [Pubkey; 1] =
+            [pda::associated_token(&user, &constants::SPL_TOKEN_2022_PROGRAM_ID, &mint).0];
         for (i, expected) in expected_atas.iter().enumerate() {
             let metas: Vec<Pubkey> = ixs[i].accounts.iter().map(|m| m.pubkey).collect();
             assert!(metas.contains(expected), "ata ix {i} missing expected ATA");
@@ -1487,16 +1734,14 @@ mod tests {
             })
             .expect("trade_tx_instructions");
 
-        assert_eq!(ixs.len(), 2);
-        assert_eq!(ixs[0].program_id, constants::SPL_ATA_PROGRAM_ID);
-        assert_eq!(ixs[0].data, vec![1]);
-        assert_eq!(ixs[1].program_id, crate::pump::ID);
+        assert_eq!(ixs.len(), 1);
+        assert_eq!(ixs[0].program_id, crate::pump::ID);
         assert_eq!(
-            &ixs[1].data[..8],
+            &ixs[0].data[..8],
             <client::args::SellV2 as Discriminator>::DISCRIMINATOR,
         );
         let metas: Vec<Pubkey> = ixs[0].accounts.iter().map(|m| m.pubkey).collect();
-        assert!(metas.contains(&user_wsol_ata(&user)));
+        assert!(metas.contains(&pda::pump::bonding_curve(&mint).0));
     }
 
     #[test]
@@ -1668,7 +1913,7 @@ mod tests {
         let slip = 200u16;
 
         let buy_direct = sdk
-            .buy_quote_bonding_curve_token_out(&g, None, &bc, supply, target, slip)
+            .buy_quote_bonding_curve_token_out(&g, &PFC, &bc, supply, target, slip)
             .expect("buy direct");
         let buy_auto = sdk
             .quote_trade(TradeQuoteParams {
@@ -1677,7 +1922,7 @@ mod tests {
                 slippage_bps: slip,
                 base_mint_supply: supply,
                 pump_global: &g,
-                pump_fee_config: None,
+                pump_fee_config: &PFC,
                 bonding_curve: &bc,
                 pump_pool: None,
             })
@@ -1686,7 +1931,7 @@ mod tests {
         assert_eq!(buy_direct, buy_auto);
 
         let sell_direct = sdk
-            .sell_quote_bonding_curve(&g, None, &bc, supply, target, slip)
+            .sell_quote_bonding_curve(&g, &PFC, &bc, supply, target, slip)
             .expect("sell direct");
         let sell_auto = sdk
             .quote_trade(TradeQuoteParams {
@@ -1695,7 +1940,7 @@ mod tests {
                 slippage_bps: slip,
                 base_mint_supply: supply,
                 pump_global: &g,
-                pump_fee_config: None,
+                pump_fee_config: &PFC,
                 bonding_curve: &bc,
                 pump_pool: None,
             })
@@ -1723,11 +1968,10 @@ mod tests {
             pool: &pool_state,
             base_reserve,
             quote_reserve,
-            virtual_quote_reserves: 0,
             base_mint_supply,
         };
         let buy_direct = sdk
-            .buy_quote_amm_token_out(&gc, None, source, target, slip)
+            .buy_quote_amm_token_out(&gc, &AFC, source, target, slip)
             .expect("buy direct");
         let buy_auto = sdk
             .quote_trade(TradeQuoteParams {
@@ -1736,15 +1980,14 @@ mod tests {
                 slippage_bps: slip,
                 base_mint_supply,
                 pump_global: &g,
-                pump_fee_config: None,
+                pump_fee_config: &PFC,
                 bonding_curve: &bc,
                 pump_pool: Some(PumpPoolQuoteCtx {
                     amm_global: &gc,
-                    amm_fee_config: None,
+                    amm_fee_config: &AFC,
                     pool_state: &pool_state,
                     base_reserve,
                     quote_reserve,
-                    virtual_quote_reserves: 0,
                 }),
             })
             .expect("auto routed")
@@ -1755,11 +1998,10 @@ mod tests {
             pool: &pool_state,
             base_reserve,
             quote_reserve,
-            virtual_quote_reserves: 0,
             base_mint_supply,
         };
         let sell_direct = sdk
-            .sell_quote_amm(&gc, None, sell_source, target, slip)
+            .sell_quote_amm(&gc, &AFC, sell_source, target, slip)
             .expect("sell direct");
         let sell_auto = sdk
             .quote_trade(TradeQuoteParams {
@@ -1768,15 +2010,14 @@ mod tests {
                 slippage_bps: slip,
                 base_mint_supply,
                 pump_global: &g,
-                pump_fee_config: None,
+                pump_fee_config: &PFC,
                 bonding_curve: &bc,
                 pump_pool: Some(PumpPoolQuoteCtx {
                     amm_global: &gc,
-                    amm_fee_config: None,
+                    amm_fee_config: &AFC,
                     pool_state: &pool_state,
                     base_reserve,
                     quote_reserve,
-                    virtual_quote_reserves: 0,
                 }),
             })
             .expect("auto routed")
@@ -1797,7 +2038,7 @@ mod tests {
                 slippage_bps: 0,
                 base_mint_supply: g.token_total_supply,
                 pump_global: &g,
-                pump_fee_config: None,
+                pump_fee_config: &PFC,
                 bonding_curve: &bc,
                 pump_pool: None,
             })
@@ -1935,6 +2176,8 @@ mod tests {
                 mayhem_mode: false,
                 cashback: false,
                 quote_mint: Pubkey::default(),
+                quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+                creator_fee_bps: 0,
                 global: &global,
                 token_amount: 1_000,
                 max_quote_tokens: max_sol,
@@ -1942,21 +2185,21 @@ mod tests {
             })
             .expect("create_coin_instructions");
 
-        assert_eq!(ixs.len(), 4);
+        assert_eq!(ixs.len(), 3);
         assert_eq!(
             &ixs[0].data[..8],
             <client::args::CreateV2 as Discriminator>::DISCRIMINATOR,
         );
-        for ata_ix in &ixs[1..3] {
+        for ata_ix in &ixs[1..2] {
             assert_eq!(ata_ix.program_id, constants::SPL_ATA_PROGRAM_ID);
             assert_eq!(ata_ix.data, vec![1]);
         }
-        assert_eq!(ixs[3].program_id, crate::pump::ID);
+        assert_eq!(ixs[2].program_id, crate::pump::ID);
         assert_eq!(
-            &ixs[3].data[..8],
+            &ixs[2].data[..8],
             <client::args::BuyV2 as Discriminator>::DISCRIMINATOR,
         );
-        let buy_metas: Vec<Pubkey> = ixs[3].accounts.iter().map(|m| m.pubkey).collect();
+        let buy_metas: Vec<Pubkey> = ixs[2].accounts.iter().map(|m| m.pubkey).collect();
         assert!(buy_metas.contains(&constants::SPL_TOKEN_2022_PROGRAM_ID));
         assert!(buy_metas.contains(&constants::NATIVE_MINT));
         assert!(buy_metas.contains(&pda::pump::sharing_config(&mint).0));
@@ -1984,6 +2227,8 @@ mod tests {
                 mayhem_mode: false,
                 cashback: false,
                 quote_mint: Pubkey::default(),
+                quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+                creator_fee_bps: 0,
                 global: &global,
                 token_amount: 1_000,
                 max_quote_tokens: 500_000,
@@ -2001,6 +2246,8 @@ mod tests {
                 mayhem_mode: false,
                 cashback: false,
                 quote_mint: Pubkey::default(),
+                quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+                creator_fee_bps: 0,
                 global: &global,
                 token_amount: 1_000,
                 max_quote_tokens: 500_000,
@@ -2040,11 +2287,11 @@ mod tests {
     fn program_ids_match_idl() {
         assert_eq!(
             crate::pump::ID,
-            pubkey!("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+            Pubkey::from_str_const("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
         );
         assert_eq!(
             crate::pump_amm::ID,
-            pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA")
+            Pubkey::from_str_const("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA")
         );
     }
 
@@ -2071,8 +2318,41 @@ mod tests {
             is_mayhem_mode: false,
             is_cashback_coin: false,
             quote_mint: constants::NATIVE_MINT,
+            creator_fee_bps: 0,
+            can_edit_creator_fee: false,
+            ..Default::default()
         })
     }
+
+    // pump-fees schedules that reproduce the flat rates of `fixture_global`
+    // (protocol 100 / creator 50) and `fixture_amm_global_config`
+    // (lp 20 / protocol 5 / creator 5) at every market cap and quote mint.
+    fn flat_fee_config(lp: u64, protocol: u64, creator: u64) -> FeeConfig {
+        use crate::pump::types::{FeeTier, Fees};
+        use crate::state::FeeConfigFromIdl;
+        let fees = Fees {
+            lp_fee_bps: lp,
+            protocol_fee_bps: protocol,
+            creator_fee_bps: creator,
+        };
+        let tier = vec![FeeTier {
+            market_cap_lamports_threshold: 0,
+            fees,
+        }];
+        FeeConfig::new(FeeConfigFromIdl {
+            bump: 0,
+            admin: Pubkey::default(),
+            flat_fees: fees,
+            fee_tiers: tier.clone(),
+            stable_fee_tiers: tier,
+            exotic_flat_fees: fees,
+        })
+    }
+
+    static PFC: std::sync::LazyLock<FeeConfig> =
+        std::sync::LazyLock::new(|| flat_fee_config(0, 100, 50));
+    static AFC: std::sync::LazyLock<FeeConfig> =
+        std::sync::LazyLock::new(|| flat_fee_config(20, 5, 5));
 
     fn fixture_amm_global_config() -> GlobalConfig {
         GlobalConfig::new(GlobalConfigFromIdl {
@@ -2093,6 +2373,54 @@ mod tests {
         })
     }
 
+    // Mirrors create_v2: SOL → Global sol reserves; Global-whitelisted mint →
+    // Global quote reserves (even if quote-control lists it too); otherwise the
+    // quote-control entry; else unsupported.
+    #[test]
+    fn initial_virtual_quote_reserves_precedence() {
+        use crate::state::{QuoteControl, QuoteControlMint};
+        let listed = fake_pubkey(0xD1);
+        let qc_only = fake_pubkey(0xD2);
+        let unlisted = fake_pubkey(0xD3);
+        let global = Global::new(GlobalFromIdl {
+            initial_virtual_sol_reserves: 30,
+            initial_virtual_quote_reserves: 40,
+            whitelisted_quote_mints: [listed],
+            ..Default::default()
+        });
+        let qc = QuoteControl {
+            admin: Pubkey::default(),
+            reserves_admin: Pubkey::default(),
+            _reserved: [0; 32],
+            mints: vec![
+                QuoteControlMint {
+                    mint: listed,
+                    initial_virtual_quote_reserves: 1,
+                },
+                QuoteControlMint {
+                    mint: qc_only,
+                    initial_virtual_quote_reserves: 50,
+                },
+            ],
+        };
+        let f = |m: &Pubkey, qc: Option<&QuoteControl>| {
+            PumpSdk::initial_virtual_quote_reserves(&global, qc, m)
+        };
+        assert_eq!(f(&Pubkey::default(), None), Some(30));
+        assert_eq!(f(&constants::NATIVE_MINT, None), Some(30));
+        assert_eq!(f(&listed, Some(&qc)), Some(40));
+        assert_eq!(f(&qc_only, Some(&qc)), Some(50));
+        assert_eq!(f(&qc_only, None), None);
+        assert_eq!(f(&unlisted, Some(&qc)), None);
+
+        let curve =
+            PumpSdk::initial_bonding_curve(&global, fake_pubkey(1), qc_only, 50, false, false, 250);
+        assert_eq!(curve.virtual_quote_reserves, 50);
+        assert_eq!(curve.quote_mint, qc_only);
+        assert_eq!(curve.creator_fee_bps, 250);
+        assert!(!curve.can_edit_creator_fee);
+    }
+
     #[test]
     fn bc_buy_sol_in_matches_ts() {
         let sdk = PumpSdk::new();
@@ -2101,7 +2429,7 @@ mod tests {
         let q = sdk
             .buy_quote_bonding_curve_sol_in(
                 &g,
-                None,
+                &PFC,
                 &bc,
                 g.token_total_supply,
                 1_000_000_000, // 1 SOL
@@ -2122,7 +2450,7 @@ mod tests {
         let q = sdk
             .buy_quote_bonding_curve_token_out(
                 &g,
-                None,
+                &PFC,
                 &bc,
                 g.token_total_supply,
                 100_000_000_000_000,
@@ -2143,7 +2471,7 @@ mod tests {
         let q = sdk
             .sell_quote_bonding_curve(
                 &g,
-                None,
+                &PFC,
                 &bc,
                 g.token_total_supply,
                 50_000_000_000_000,
@@ -2160,9 +2488,44 @@ mod tests {
         let g = fixture_global();
         let bc = fixture_bonding_curve(Pubkey::default());
         let q = sdk
-            .sell_quote_bonding_curve(&g, None, &bc, g.token_total_supply, 50_000_000_000_000, 0)
+            .sell_quote_bonding_curve(&g, &PFC, &bc, g.token_total_supply, 50_000_000_000_000, 0)
             .unwrap();
         assert_eq!(q.amount, 1_322_350_845);
+    }
+
+    // A boosted pool must price against vault balance + virtual_quote_reserves,
+    // matching `Pool::effective_quote_reserves` in pump-amm.
+    #[test]
+    fn amm_boost_pool_quotes_against_effective_reserves() {
+        let sdk = PumpSdk::new();
+        let gc = fixture_amm_global_config();
+        let mut boosted = fixture_pool(fake_pubkey(0xCC));
+        boosted.virtual_quote_reserves = 10_000_000_000;
+
+        let quote = |pool: &Pool, quote_reserve: u64| {
+            sdk.buy_quote_amm_sol_in(
+                &gc,
+                &AFC,
+                AmmQuoteSource::Pool {
+                    pool,
+                    base_reserve: 200_000_000_000_000,
+                    quote_reserve,
+                    base_mint_supply: 1_000_000_000_000_000,
+                },
+                1_000_000_000,
+                100,
+            )
+            .unwrap()
+            .amount
+        };
+
+        let plain = fixture_pool(fake_pubkey(0xCC));
+        // 30 SOL vault + 10 SOL boost prices like a plain 40 SOL pool.
+        assert_eq!(
+            quote(&boosted, 30_000_000_000),
+            quote(&plain, 40_000_000_000)
+        );
+        assert!(quote(&boosted, 30_000_000_000) < quote(&plain, 30_000_000_000));
     }
 
     #[test]
@@ -2173,20 +2536,19 @@ mod tests {
         let q = sdk
             .buy_quote_amm_sol_in(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000,
                 100,
             )
             .unwrap();
-        assert_eq!(q.amount, 6_432_936_635_069);
-        assert_eq!(q.min_out, 6_368_607_268_718);
+        assert_eq!(q.amount, 6_432_936_622_580);
+        assert_eq!(q.min_out, 6_368_607_256_354);
         assert_eq!(q.max_input, 1_010_000_000);
     }
 
@@ -2198,12 +2560,11 @@ mod tests {
         let q = sdk
             .buy_quote_amm_token_out(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000_000,
@@ -2222,12 +2583,11 @@ mod tests {
         let q = sdk
             .sell_quote_amm(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000_000,
@@ -2246,12 +2606,11 @@ mod tests {
         let q = sdk
             .sell_quote_amm(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 200_000_000_000_000,
                     quote_reserve: 30_000_000_000,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000_000_000_000,
                 },
                 1_000_000_000_000,
@@ -2267,11 +2626,11 @@ mod tests {
         let g = fixture_global();
         let bc = fixture_bonding_curve(fake_pubkey(7));
         let q = sdk
-            .buy_quote_bonding_curve_sol_in(&g, None, &bc, g.token_total_supply, 0, 100)
+            .buy_quote_bonding_curve_sol_in(&g, &PFC, &bc, g.token_total_supply, 0, 100)
             .unwrap();
         assert_eq!(q.amount, 0);
         let q = sdk
-            .sell_quote_bonding_curve(&g, None, &bc, g.token_total_supply, 0, 100)
+            .sell_quote_bonding_curve(&g, &PFC, &bc, g.token_total_supply, 0, 100)
             .unwrap();
         assert_eq!(q.amount, 0);
     }
@@ -2283,7 +2642,7 @@ mod tests {
         let mut bc = fixture_bonding_curve(fake_pubkey(7));
         bc.virtual_token_reserves = 0;
         let q = sdk
-            .buy_quote_bonding_curve_sol_in(&g, None, &bc, g.token_total_supply, 1_000_000_000, 0)
+            .buy_quote_bonding_curve_sol_in(&g, &PFC, &bc, g.token_total_supply, 1_000_000_000, 0)
             .unwrap();
         assert_eq!(q.amount, 0);
     }
@@ -2296,12 +2655,11 @@ mod tests {
         let err = sdk
             .buy_quote_amm_sol_in(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 0,
                     quote_reserve: 1_000,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000,
                 },
                 1,
@@ -2312,12 +2670,11 @@ mod tests {
         let err = sdk
             .sell_quote_amm(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 1_000,
                     quote_reserve: 0,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000,
                 },
                 1,
@@ -2335,12 +2692,11 @@ mod tests {
         let err = sdk
             .buy_quote_amm_token_out(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 1_000,
                     quote_reserve: 1_000,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000,
                 },
                 1_000,
@@ -2351,12 +2707,11 @@ mod tests {
         let err = sdk
             .buy_quote_amm_token_out(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::Pool {
                     pool: &pool,
                     base_reserve: 1_000,
                     quote_reserve: 1_000,
-                    virtual_quote_reserves: 0,
                     base_mint_supply: 1_000_000,
                 },
                 5_000,
@@ -2375,7 +2730,7 @@ mod tests {
         let err = sdk
             .buy_quote_bonding_curve_token_out(
                 &g,
-                None,
+                &PFC,
                 &bc,
                 g.token_total_supply,
                 bc.virtual_token_reserves,
@@ -2395,7 +2750,7 @@ mod tests {
         let err = sdk
             .buy_quote_amm_sol_in(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::BondingCurveComplete {
                     global: &g,
                     bonding_curve: &bc,
@@ -2421,7 +2776,7 @@ mod tests {
         let q = sdk
             .buy_quote_amm_sol_in(
                 &gc,
-                None,
+                &AFC,
                 AmmQuoteSource::BondingCurveComplete {
                     global: &g,
                     bonding_curve: &bc,
@@ -2438,18 +2793,121 @@ mod tests {
         let pool_creator = pda::pump::pool_authority(&base_mint).0;
         let ctx = AmmContext {
             global_config: &gc,
-            fee_config: None,
+            fee_config: &AFC,
             base_mint: &base_mint,
             pool_creator: &pool_creator,
             coin_creator: &bc.creator,
+            quote_mint: &bc.quote_mint,
+            creator_fee_bps: 0,
             base_reserve,
             quote_reserve,
-            virtual_quote_reserves: 0,
             base_mint_supply: g.token_total_supply,
+            real_quote_reserve: quote_reserve,
         };
         let expected = amm_math::buy_quote_input(&ctx, 1_000_000_000)
             .unwrap()
             .base_amount_out;
         assert_eq!(q.amount, expected);
+    }
+
+    // The migration deposits the base ATA (already less the post-completion leg's
+    // tokens) and the raise plus the leg's quote.
+    #[test]
+    fn estimated_reserves_include_the_post_completion_leg() {
+        let g = fixture_global();
+        let mut bc = fixture_bonding_curve(fake_pubkey(7));
+        bc.real_quote_reserves = 85_000_000_000;
+        bc.post_complete_base_out = 6_000_000_000_000;
+        bc.post_complete_quote_in = 3_000_000_000;
+        assert_eq!(
+            estimated_reserves(&g, &bc),
+            Ok((
+                g.token_total_supply - g.initial_real_token_reserves - 6_000_000_000_000,
+                85_000_000_000 + 3_000_000_000 - g.pool_migration_fee
+            ))
+        );
+        bc.quote_mint = fake_pubkey(9);
+        assert_eq!(estimated_reserves(&g, &bc).unwrap().1, 88_000_000_000);
+    }
+
+    #[test]
+    fn v3_quotes_continue_past_the_curve() {
+        let sdk = PumpSdk::new();
+        let g = fixture_global();
+        let bc = fixture_bonding_curve(fake_pubkey(7));
+        let base_ata = g.token_total_supply;
+        let q = sdk
+            .buy_quote_bonding_curve_v3_token_out(
+                &g,
+                &PFC,
+                &bc,
+                0,
+                base_ata,
+                800_000_000_000_000,
+                100,
+            )
+            .unwrap();
+        assert_eq!(q.min_out, 800_000_000_000_000);
+        let v2 = sdk
+            .buy_quote_bonding_curve_token_out(&g, &PFC, &bc, 0, 800_000_000_000_000, 0)
+            .unwrap();
+        assert!(q.amount > v2.amount);
+        let q = sdk
+            .buy_quote_bonding_curve_v3_sol_in(&g, &PFC, &bc, 0, base_ata, 100_000_000_000, 0)
+            .unwrap();
+        assert!(q.amount > bc.real_token_reserves);
+        assert!(q.input_amount_used <= q.max_input);
+    }
+
+    // USDC → curve coin, one hop: a full-fee curve hop; min_out never drops to 0.
+    #[test]
+    fn quote_multi_hop_swap_single_curve_hop() {
+        let sdk = PumpSdk::new();
+        let g = fixture_global();
+        let mut bc = fixture_bonding_curve(fake_pubkey(7));
+        bc.quote_mint = crate::math::fees::USDC_MINT;
+        let hops = [RouteHop::Curve {
+            mint: fake_pubkey(8),
+            bonding_curve: &bc,
+            base_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            quote_token_program: constants::SPL_TOKEN_PROGRAM_ID,
+            mint_supply: 0,
+            base_ata_amount: g.token_total_supply,
+        }];
+        let gc = fixture_amm_global_config();
+        let quote = |amount_in, slippage_bps| {
+            sdk.quote_multi_hop_swap(
+                &g,
+                &PFC,
+                &gc,
+                &AFC,
+                &fake_pubkey(1),
+                crate::math::fees::USDC_MINT,
+                &hops,
+                amount_in,
+                slippage_bps,
+            )
+        };
+        let q = quote(1_000_000, 10_000).unwrap();
+        assert_eq!(q.min_out, 1);
+        assert_eq!(
+            q.amount,
+            bc_math::buy_token_amount_from_sol_amount(&g, &PFC, &bc, 0, 1_000_000).unwrap()
+        );
+        assert_eq!(quote(0, 0), Err(QuoteError::ZeroAmount));
+        // The route must start from one side of the first venue.
+        assert!(sdk
+            .quote_multi_hop_swap(
+                &g,
+                &PFC,
+                &gc,
+                &AFC,
+                &fake_pubkey(1),
+                fake_pubkey(3),
+                &hops,
+                1_000_000,
+                0,
+            )
+            .is_err());
     }
 }

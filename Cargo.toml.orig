@@ -1,8 +1,8 @@
 [package]
 name = "pump-rust-client"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.89"
 # `resolver = "3"` requires Cargo's unstable `edition2024` (rejected by solana-verify / cargo 1.81).
 resolver = "2"
 description = "Rust SDK for the pump and pump_amm Solana programs: instruction builders, quoting, PDA helpers, and optional RPC client features."
@@ -33,14 +33,25 @@ local-validator = [
     "dep:dotenvy",
 ]
 
+[lints.rust]
+# `declare_program!` expands to `cfg(target_os = "solana")` checks; "solana" is
+# not a known target_os on host builds, so silence the resulting unexpected_cfgs.
+unexpected_cfgs = { level = "allow" }
+
+[lints.clippy]
+# Instruction builders intentionally take one argument per account; the account
+# sets are dictated by the on-chain programs, not a style choice.
+too_many_arguments = "allow"
+
 [dependencies]
 fastrand = "2"
-anchor-lang = { version = "0.31", features = ["event-cpi", "init-if-needed", "allow-missing-optionals"] }
-anchor-spl = { version = "0.31", features = ["metadata", "spl-token-group-interface", "token_2022", "spl-token-metadata-interface", "token_2022_extensions", "spl-token-2022"] }
-solana-program = "2.1.21"
 
-solana-sdk = { version = "2.1.21", optional = true }
-solana-client = { version = "2.1.21", optional = true }
+anchor-lang = { version = ">=0.31, <2", features = ["event-cpi", "init-if-needed", "allow-missing-optionals"] }
+anchor-spl = { version = ">=0.31, <2", features = ["metadata", "spl-token-group-interface", "token_2022", "spl-token-metadata-interface", "token_2022_extensions"] }
+solana-program = ">=2.1.21"
+
+solana-sdk = { version = ">=2.1.21, <3", optional = true }
+solana-client = { version = ">=2.1.21, <3", optional = true }
 
 # Optional deps used only when the `local-validator` feature is enabled.
 solana-test-validator = { version = "2.1.21", optional = true }
@@ -67,6 +78,11 @@ name = "clone_devnet_accounts"
 path = "src/bin/clone_devnet_accounts/main.rs"
 required-features = ["local-validator"]
 
+[[bin]]
+name = "airdropusdc"
+path = "src/bin/airdropusdc/main.rs"
+required-features = ["local-validator"]
+
 [[example]]
 name = "create_v2"
 path = "examples/create_v2.rs"
@@ -75,6 +91,11 @@ required-features = ["local-validator"]
 [[example]]
 name = "create_v2_and_buy"
 path = "examples/create_v2_and_buy.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "create_v2_token2022_quote"
+path = "examples/create_v2_token2022_quote.rs"
 required-features = ["local-validator"]
 
 [[example]]
@@ -102,7 +123,42 @@ name = "claim_cashback_v2"
 path = "examples/claim_cashback_v2.rs"
 required-features = ["local-validator"]
 
+[[example]]
+name = "collect_creator_fee_v2"
+path = "examples/collect_creator_fee_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "distribute_creator_fees_v2"
+path = "examples/distribute_creator_fees_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "collect_coin_creator_fee"
+path = "examples/collect_coin_creator_fee.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "transfer_creator_fees_to_pump_v2"
+path = "examples/transfer_creator_fees_to_pump_v2.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "buy_v3"
+path = "examples/buy_v3.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "sweep_creator_fee"
+path = "examples/sweep_creator_fee.rs"
+required-features = ["local-validator"]
+
+[[example]]
+name = "multi_hop_swap"
+path = "examples/multi_hop_swap.rs"
+required-features = ["local-validator"]
+
 [dev-dependencies]
-solana-sdk = "2.1.21"
-solana-client = "2.1.21"
+solana-sdk = ">=2.1.21, <3"
+solana-client = ">=2.1.21, <3"
 tokio = { version = "1.44.1", features = ["full"] }

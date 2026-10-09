@@ -11,6 +11,16 @@ pub fn mul_div_u128(a: u128, b: u128, c: u128) -> QuoteResult<u128> {
         .ok_or(QuoteError::MathOverflow)
 }
 
+/// Constant-product exact-in swap, `floor(amount * out_reserve / (in_reserve + amount))`
+/// (`swap_exact_input` in both programs).
+#[inline]
+pub fn swap_exact_input(amount: u128, in_reserve: u128, out_reserve: u128) -> QuoteResult<u128> {
+    let denom = in_reserve
+        .checked_add(amount)
+        .ok_or(QuoteError::MathOverflow)?;
+    mul_div_u128(amount, out_reserve, denom)
+}
+
 /// `value * (10_000 + bps) / 10_000`. Saturates on the rare case the
 /// multiplication itself overflows `u64`.
 #[inline]

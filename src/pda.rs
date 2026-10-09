@@ -1,6 +1,6 @@
-//! PDA derivations for `pump` and `pump_amm`. Each returns `(Pubkey, bump)`.
+//! PDA derivations for `pump`, `pump_amm` and `pump_fees`. Each returns `(Pubkey, bump)`.
 
-use solana_program::pubkey::Pubkey;
+use anchor_lang::solana_program::pubkey::Pubkey;
 
 use crate::constants;
 
@@ -18,6 +18,12 @@ pub mod pump {
 
     pub fn global() -> (Pubkey, u8) {
         Pubkey::find_program_address(&[GLOBAL_SEED], &PROGRAM_ID)
+    }
+
+    /// Optional 4th remaining account on `create_v2`; lists quote mints not
+    /// whitelisted on `Global`, each with its own initial virtual quote reserves.
+    pub fn quote_control() -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[QUOTE_CONTROL_SEED], &PROGRAM_ID)
     }
 
     pub fn bonding_curve(mint: &Pubkey) -> (Pubkey, u8) {
@@ -135,6 +141,13 @@ pub mod pump_amm {
         )
     }
 
+    /// The pool pump creates on migration: index 0, created by the pump
+    /// `pool-authority` PDA of `base_mint`.
+    pub fn canonical_pool(base_mint: &Pubkey, quote_mint: &Pubkey) -> (Pubkey, u8) {
+        let creator = super::pump::pool_authority(base_mint).0;
+        pool(0, &creator, base_mint, quote_mint)
+    }
+
     pub fn lp_mint(pool: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[POOL_LP_MINT_SEED, pool.as_ref()], &PROGRAM_ID)
     }
@@ -162,6 +175,30 @@ pub mod pump_amm {
     pub fn fee_config() -> (Pubkey, u8) {
         Pubkey::find_program_address(
             &[FEE_CONFIG_SEED, FEE_CONFIG_PROGRAM_SEED_KEY.as_ref()],
+            &constants::FEE_PROGRAM_ID,
+        )
+    }
+
+    pub fn boost_vault_authority(pool: &Pubkey) -> (Pubkey, u8) {
+        Pubkey::find_program_address(&[BOOST_VAULT_AUTHORITY_SEED, pool.as_ref()], &PROGRAM_ID)
+    }
+
+    pub fn boost_vault(
+        pool: &Pubkey,
+        quote_mint: &Pubkey,
+        quote_token_program: &Pubkey,
+    ) -> (Pubkey, u8) {
+        let (authority, _) = boost_vault_authority(pool);
+        super::associated_token(&authority, quote_token_program, quote_mint)
+    }
+}
+
+pub mod pump_fees {
+    use super::*;
+
+    pub fn event_authority() -> (Pubkey, u8) {
+        Pubkey::find_program_address(
+            &[constants::pump::EVENT_AUTHORITY_SEED],
             &constants::FEE_PROGRAM_ID,
         )
     }

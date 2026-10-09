@@ -8,7 +8,9 @@ use solana_sdk::signature::{Keypair, Signer};
 use pump_rust_client::{constants, PumpSdk};
 
 use common::fixtures::NOT_GRADUATED_DEVNET_MINT;
-use common::{airdrop_blocking, load_alt, make_client, make_rpc, send_v0_tx, DEFAULT_USER_LAMPORTS};
+use common::{
+    airdrop_blocking, load_alt, make_client, make_rpc, send_v0_tx, DEFAULT_USER_LAMPORTS,
+};
 
 #[tokio::main]
 async fn main() {

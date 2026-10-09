@@ -8,7 +8,9 @@ use solana_sdk::signature::{Keypair, Signer};
 
 use pump_rust_client::{constants, PumpSdk};
 
-use common::{airdrop_blocking, load_alt, make_client, make_rpc, send_v0_tx, DEFAULT_USER_LAMPORTS};
+use common::{
+    airdrop_blocking, load_alt, make_client, make_rpc, send_v0_tx, DEFAULT_USER_LAMPORTS,
+};
 
 #[tokio::main]
 async fn main() {
@@ -31,8 +33,10 @@ async fn main() {
             "https://example.com/cbex.json",
             user.pubkey(),
             Pubkey::default(),
+            constants::SPL_TOKEN_PROGRAM_ID,
             false,
             true,
+            0,
             None,
             &global,
             1_000_000_000,
