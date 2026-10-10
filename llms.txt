@@ -1,0 +1,28 @@
+# pumpfun-rust-client
+
+> Rust SDK for the pump and pump_amm Solana programs: instruction builders, quoting and transaction building for bonding curve and AMM trades.
+
+pumpfun-rust-client is an open-source repository by nirholas, part of the three.ws ecosystem.
+
+## Docs
+
+- [README](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md): install, usage and reference
+- [Quickstart: buy](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#quickstart-buy)
+- [Quoting](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#quoting)
+- [Instruction reference](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#instruction-reference)
+- [Building, signing, and sending: AsyncPumpClient](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#building-signing-and-sending-asyncpumpclient)
+- [Account initialization](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#account-initialization)
+- [Synthetic migration: v3 buys past the curve](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#synthetic-migration-v3-buys-past-the-curve)
+- [AMM pricing: signed virtualquotereserves](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#amm-pricing-signed-virtualquotereserves)
+- [Examples](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/README.md#examples)
+- [AGENTS.md](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/AGENTS.md): guidance for coding agents
+- [Full text for LLMs](https://github.com/nirholas/pumpfun-rust-client/blob/HEAD/llms-full.txt): the README inlined
+
+## Project
+
+- [Source](https://github.com/nirholas/pumpfun-rust-client)
+- [Issues](https://github.com/nirholas/pumpfun-rust-client/issues)
+- [Discussions](https://github.com/nirholas/pumpfun-rust-client/discussions)
+- [Homepage](https://nirholas.github.io/pumpfun-rust-client/)
+- [three.ws](https://three.ws): the platform this is part of
+- [All repositories by nirholas](https://github.com/nirholas/nirholas#readme)

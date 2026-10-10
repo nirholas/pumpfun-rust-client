@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it as below.
+title: "pumpfun-rust-client"
+abstract: "Rust SDK for the pump and pump_amm Solana programs: instruction builders, quoting and transaction building for bonding curve and AMM trades."
+repository-code: "https://github.com/nirholas/pumpfun-rust-client"
+url: "https://three.ws"
+authors:
+  - name: three.ws
+    website: "https://three.ws"
