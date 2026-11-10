@@ -1,0 +1,17 @@
+{
+  "name": "pump-rust-client",
+  "version": "0.4.0",
+  "description": "Write Rust code against the pump and pump_amm Solana programs: instruction builders, quoting and transaction building.",
+  "author": {
+    "name": "nirholas"
+  },
+  "repository": "https://github.com/nirholas/pumpfun-rust-client",
+  "homepage": "https://nirholas.github.io/pumpfun-rust-client/",
+  "keywords": [
+    "rust",
+    "solana",
+    "pump-fun",
+    "sdk",
+    "trading"
+  ]
+}

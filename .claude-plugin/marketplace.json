@@ -1,0 +1,22 @@
+{
+  "name": "pumpfun-rust-client",
+  "owner": {
+    "name": "nirholas"
+  },
+  "description": "Write Rust code against the pump and pump_amm Solana programs: instruction builders, quoting and transaction building.",
+  "plugins": [
+    {
+      "name": "pump-rust-client",
+      "source": "./plugins/pump-rust-client",
+      "description": "Write Rust code against the pump and pump_amm Solana programs: instruction builders, quoting and transaction building.",
+      "category": "development",
+      "tags": [
+        "rust",
+        "solana",
+        "pump-fun",
+        "sdk",
+        "trading"
+      ]
+    }
+  ]
+}
