@@ -6,6 +6,8 @@ pub mod fees;
 pub mod utils;
 
 #[cfg(test)]
+mod proptests;
+#[cfg(test)]
 mod synthetic_migration_tests;
 
 pub use bonding_curve::TOKEN_SUPPLY;
