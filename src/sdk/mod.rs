@@ -124,7 +124,7 @@ pub struct PumpPoolCtx<'a> {
     pub pool_state: &'a Pool,
 }
 
-/// [`PumpSdk::trade_tx_instructions`] parameters: routes from [`BondingCurve::complete`].
+/// [`PumpSdk::trade_tx_instructions`] parameters: routes on `BondingCurve::complete`.
 /// `pump_pool` is required when the curve is complete.
 #[derive(Clone, Copy, Debug)]
 pub struct TradeTxParams<'a> {
@@ -151,7 +151,7 @@ pub struct PumpPoolQuoteCtx<'a> {
     pub quote_reserve: u64,
 }
 
-/// [`PumpSdk::quote_trade`] parameters: routes from [`BondingCurve::complete`], mirroring
+/// [`PumpSdk::quote_trade`] parameters: routes on `BondingCurve::complete`, mirroring
 /// [`TradeTxParams`]. `pump_pool` is required when the curve is complete.
 #[derive(Clone, Copy, Debug)]
 pub struct TradeQuoteParams<'a> {
