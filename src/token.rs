@@ -9,8 +9,12 @@
 // solana-program 2.3 deprecates `system_instruction` in favour of the
 // `solana-system-interface` crate, which is not a direct dependency here.
 #[allow(deprecated)]
-use anchor_lang::solana_program::{instruction::Instruction, pubkey::Pubkey, system_instruction};
-use anchor_spl::token::spl_token::instruction::{close_account, sync_native};
+use anchor_lang::solana_program::{
+    instruction::{AccountMeta, Instruction},
+    pubkey::Pubkey,
+    system_instruction,
+};
+use anchor_spl::token::spl_token::instruction::TokenInstruction;
 
 pub use anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 
@@ -31,8 +35,11 @@ pub fn wrap_sol_instructions(user: &Pubkey, lamports: u64) -> [Instruction; 2] {
     let ata = user_wsol_ata(user);
     [
         system_instruction::transfer(user, &ata, lamports),
-        sync_native(&constants::SPL_TOKEN_PROGRAM_ID, &ata)
-            .expect("sync_native: token program id is constant"),
+        Instruction {
+            program_id: constants::SPL_TOKEN_PROGRAM_ID,
+            accounts: vec![AccountMeta::new(ata, false)],
+            data: TokenInstruction::SyncNative.pack(),
+        },
     ]
 }
 
@@ -40,6 +47,37 @@ pub fn wrap_sol_instructions(user: &Pubkey, lamports: u64) -> [Instruction; 2] {
 /// Unwraps the wSOL balance back to lamports on the user's main account.
 pub fn unwrap_sol_instruction(user: &Pubkey) -> Instruction {
     let ata = user_wsol_ata(user);
-    close_account(&constants::SPL_TOKEN_PROGRAM_ID, &ata, user, user, &[])
-        .expect("close_account: token program id is constant")
+    // Built directly: spl-token's `close_account` helper returns a `Result`
+    // that only fails for a foreign token program id.
+    Instruction {
+        program_id: constants::SPL_TOKEN_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(ata, false),
+            AccountMeta::new(*user, false),
+            AccountMeta::new_readonly(*user, true),
+        ],
+        data: TokenInstruction::CloseAccount.pack(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anchor_spl::token::spl_token::instruction::{close_account, sync_native};
+
+    #[test]
+    fn wsol_helpers_match_spl_token_builders() {
+        let user = Pubkey::new_unique();
+        let ata = user_wsol_ata(&user);
+        let [transfer, sync] = wrap_sol_instructions(&user, 42);
+        assert_eq!(transfer, system_instruction::transfer(&user, &ata, 42));
+        assert_eq!(
+            sync,
+            sync_native(&constants::SPL_TOKEN_PROGRAM_ID, &ata).unwrap()
+        );
+        assert_eq!(
+            unwrap_sol_instruction(&user),
+            close_account(&constants::SPL_TOKEN_PROGRAM_ID, &ata, &user, &user, &[]).unwrap()
+        );
+    }
 }
