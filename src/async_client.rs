@@ -361,14 +361,7 @@ impl AsyncPumpClient {
             *mint,
         ];
         let accounts = self.get_many(&keys).await?;
-        let get = |i: usize, name: &'static str| -> Result<&Account> {
-            accounts[i]
-                .as_ref()
-                .ok_or(PumpClientError::AccountNotFound {
-                    name,
-                    address: keys[i],
-                })
-        };
+        let get = |i: usize, name: &'static str| required(&accounts, &keys, i, name);
         let bonding_curve = decode_bonding_curve(&get(2, "bonding_curve")?.data)?;
         let (mint_supply, base_token_program) = Self::mint_info(get(3, "mint")?)?;
         let quote_mint = PumpSdk::resolve_quote_mint(bonding_curve.quote_mint);
@@ -376,7 +369,10 @@ impl AsyncPumpClient {
         let second = [quote_mint, base_ata];
         let more = self.get_many(&second).await?;
         let quote_token_program = required(&more, &second, 0, "quote_mint")?.owner;
-        let base_ata_amount = more[1].as_ref().map_or(Ok(0), token_amount)?;
+        let base_ata_amount = more
+            .get(1)
+            .and_then(Option::as_ref)
+            .map_or(Ok(0), token_amount)?;
         let global = decode_global(&get(0, "global")?.data)?;
         let buyback_fee_recipient = PumpSdk::buyback_fee_recipient_from_pump_global(&global)
             .ok_or(PumpClientError::AccountNotFound {
@@ -570,7 +566,7 @@ impl AsyncPumpClient {
         out_mint: &Pubkey,
         stop_at: Option<&Pubkey>,
     ) -> Result<MultiHopRoute> {
-        // ponytail: 8 hops is well past what a transaction fits; guards a cyclic chain.
+        // Eight hops is well past what one transaction fits; the cap also ends a cyclic chain.
         const MAX_HOPS: usize = 8;
         let mut venues = Vec::new();
         let mut mint = *out_mint;
@@ -849,18 +845,21 @@ impl AsyncPumpClient {
     }
 }
 
-/// `accounts[i]` (fetched for `keys[i]`), or `AccountNotFound`.
+/// `accounts[i]` (fetched for `keys[i]`), or `AccountNotFound`. A response
+/// shorter than the request (a misbehaving RPC node) reads as missing rather
+/// than panicking on the index.
 fn required<'a>(
     accounts: &'a [Option<Account>],
     keys: &[Pubkey],
     i: usize,
     name: &'static str,
 ) -> Result<&'a Account> {
-    accounts[i]
-        .as_ref()
+    accounts
+        .get(i)
+        .and_then(Option::as_ref)
         .ok_or(PumpClientError::AccountNotFound {
             name,
-            address: keys[i],
+            address: keys.get(i).copied().unwrap_or_default(),
         })
 }
 
@@ -1079,6 +1078,18 @@ mod tests {
     fn client_is_send_sync_clone() {
         fn assert_traits<T: Send + Sync + Clone>() {}
         assert_traits::<AsyncPumpClient>();
+    }
+
+    #[test]
+    fn required_treats_a_short_rpc_response_as_missing() {
+        let keys = [Pubkey::new_unique(), Pubkey::new_unique()];
+        let accounts = vec![Some(Account::default())];
+        assert!(required(&accounts, &keys, 0, "first").is_ok());
+        assert!(matches!(
+            required(&accounts, &keys, 1, "second"),
+            Err(PumpClientError::AccountNotFound { name: "second", address }) if address == keys[1]
+        ));
+        assert!(required(&accounts, &keys, 5, "past_both").is_err());
     }
 
     #[test]
