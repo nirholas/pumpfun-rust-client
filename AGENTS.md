@@ -36,9 +36,13 @@ cargo build
 
 | Task | Command |
 |---|---|
-| test | `cargo test` |
-| lint | `cargo clippy` |
+| test (offline: unit, property, IDL conformance, doctests) | `cargo test --features client` |
+| test (against a local validator) | `just build-and-test` |
+| lint | `cargo clippy --all-targets --features client -- -D warnings` |
+| docs | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features client` |
 | format | `cargo fmt` |
+
+`tests/idl_conformance.rs` checks every instruction builder against `idls/`; extend it when you add a builder.
 
 Run the test and lint commands above before you consider a change finished. If a command fails on code you did not touch, say so in your report instead of silently skipping it.
 
