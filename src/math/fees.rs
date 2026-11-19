@@ -24,10 +24,20 @@ pub fn ceil_div(a: u128, b: u128) -> u128 {
     a.div_ceil(b)
 }
 
-/// `ceil(amount * basis_points / 10_000)`.
+/// `ceil(amount * basis_points / 10_000)`, exact whenever the result fits in
+/// a `u128` (the product is split when it would overflow) and saturating at
+/// `u128::MAX` otherwise.
 #[inline]
 pub fn fee_amount(amount: u128, basis_points: u64) -> u128 {
-    ceil_div(amount * basis_points as u128, 10_000)
+    let bps = u128::from(basis_points);
+    match amount.checked_mul(bps) {
+        Some(product) => ceil_div(product, 10_000),
+        // amount = q * 10_000 + r, so ceil(amount * bps / 10_000)
+        //        = q * bps + ceil(r * bps / 10_000); r * bps cannot overflow.
+        None => (amount / 10_000)
+            .saturating_mul(bps)
+            .saturating_add(ceil_div((amount % 10_000) * bps, 10_000)),
+    }
 }
 
 /// `fee_amount(amount, basis_points)`, or `0` when `creator` is `Pubkey::default()`
@@ -72,22 +82,32 @@ pub(crate) fn exact_in_fee_amounts(amount_in: u64, bps: [u64; 3]) -> QuoteResult
 
 /// Bonding-curve market cap in lamports.
 /// `marketCap = virtualQuoteReserves * mintSupply / virtualTokenReserves`.
+///
+/// # Panics
+///
+/// If `virtual_token_reserves` is zero (a migrated curve).
+/// [`compute_bonding_curve_fee_bps`] checks this and returns
+/// [`QuoteError::EmptyReserves`] instead.
 #[inline]
 pub fn bonding_curve_market_cap(
     mint_supply: u64,
     virtual_quote_reserves: u64,
     virtual_token_reserves: u64,
 ) -> u128 {
-    debug_assert!(virtual_token_reserves != 0);
-    (virtual_quote_reserves as u128) * (mint_supply as u128) / (virtual_token_reserves as u128)
+    u128::from(virtual_quote_reserves) * u128::from(mint_supply)
+        / u128::from(virtual_token_reserves)
 }
 
 /// AMM pool market cap in lamports.
 /// `marketCap = quoteReserve * baseMintSupply / baseReserve`.
+///
+/// # Panics
+///
+/// If `base_reserve` is zero. [`compute_amm_fee_bps`] checks this and returns
+/// [`QuoteError::EmptyReserves`] instead.
 #[inline]
 pub fn pool_market_cap(base_mint_supply: u64, base_reserve: u64, quote_reserve: u64) -> u128 {
-    debug_assert!(base_reserve != 0);
-    (quote_reserve as u128) * (base_mint_supply as u128) / (base_reserve as u128)
+    u128::from(quote_reserve) * u128::from(base_mint_supply) / u128::from(base_reserve)
 }
 
 /// `true` iff `pool_creator` matches the canonical pump-program-derived pool
@@ -174,7 +194,8 @@ pub fn fees_for_quote_mint<'a>(
 /// schedule's creator rate with the coin's own `coin_creator_fee_bps` while
 /// `Global.creator_fee_configurable` is on and the stored rate is nonzero
 /// (0 = "not configured, use the schedule"). `Global`'s own bps fields play
-/// no part in on-chain pricing.
+/// no part in on-chain pricing. [`QuoteError::EmptyReserves`] when
+/// `virtual_token_reserves` is zero.
 pub fn compute_bonding_curve_fee_bps(
     global: &Global,
     fee_config: &FeeConfig,
@@ -184,6 +205,9 @@ pub fn compute_bonding_curve_fee_bps(
     virtual_quote_reserves: u64,
     virtual_token_reserves: u64,
 ) -> QuoteResult<BondingCurveFeeBps> {
+    if virtual_token_reserves == 0 {
+        return Err(QuoteError::EmptyReserves);
+    }
     let market_cap =
         bonding_curve_market_cap(mint_supply, virtual_quote_reserves, virtual_token_reserves);
     let fees = fees_for_quote_mint(fee_config, true, market_cap, quote_mint)?;
@@ -202,6 +226,7 @@ pub fn compute_bonding_curve_fee_bps(
 /// `coin_creator_fee_bps` replaces the schedule's creator rate while
 /// `GlobalConfig.creator_fee_configurable` is on and the stored rate is nonzero.
 /// `GlobalConfig`'s own bps fields play no part in on-chain pricing.
+/// [`QuoteError::EmptyReserves`] when `base_reserve` is zero.
 pub fn compute_amm_fee_bps(
     global_config: &GlobalConfig,
     fee_config: &FeeConfig,
@@ -213,6 +238,9 @@ pub fn compute_amm_fee_bps(
     base_reserve: u64,
     quote_reserve: u64,
 ) -> QuoteResult<AmmFeeBps> {
+    if base_reserve == 0 {
+        return Err(QuoteError::EmptyReserves);
+    }
     let market_cap = pool_market_cap(base_mint_supply, base_reserve, quote_reserve);
     let fees = fees_for_quote_mint(
         fee_config,
@@ -301,6 +329,41 @@ mod tests {
             Some(QuoteError::EmptyFeeTiers)
         );
         assert!(fees_for_quote_mint(&no_stable, true, 0, &other).is_ok());
+    }
+
+    #[test]
+    fn fee_amount_is_exact_past_the_u128_product() {
+        assert_eq!(fee_amount(0, 100), 0);
+        assert_eq!(fee_amount(1, 1), 1);
+        assert_eq!(fee_amount(10_000, 1), 1);
+        assert_eq!(fee_amount(10_001, 1), 2);
+        // `amount * bps` overflows u128 but the fee itself fits.
+        assert_eq!(fee_amount(u128::MAX, 1), u128::MAX.div_ceil(10_000));
+        assert_eq!(fee_amount(u128::MAX, 10_000), u128::MAX);
+        let amount = u128::MAX / 3;
+        assert_eq!(fee_amount(amount, 9_999), {
+            let (q, r) = (amount / 10_000, amount % 10_000);
+            q * 9_999 + (r * 9_999).div_ceil(10_000)
+        });
+        // A fee that does not fit saturates rather than wrapping.
+        assert_eq!(fee_amount(u128::MAX, u64::MAX), u128::MAX);
+    }
+
+    #[test]
+    fn empty_reserves_are_an_error_not_a_division_by_zero() {
+        use crate::state::pump_amm::GlobalConfigFromIdl;
+        let cfg = config(fees(5, 300, 25));
+        let sol = Pubkey::default();
+        assert_eq!(
+            compute_bonding_curve_fee_bps(&Global::default(), &cfg, &sol, 0, 1, 1, 0).err(),
+            Some(QuoteError::EmptyReserves)
+        );
+        let gc = GlobalConfig::new(GlobalConfigFromIdl::default());
+        let mint = Pubkey::new_unique();
+        assert_eq!(
+            compute_amm_fee_bps(&gc, &cfg, &mint, &mint, &sol, 0, 1, 0, 1).err(),
+            Some(QuoteError::EmptyReserves)
+        );
     }
 
     // A coin's own creator rate wins over the schedule only while the gate is
