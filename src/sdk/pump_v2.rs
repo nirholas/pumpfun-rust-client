@@ -926,13 +926,9 @@ impl PumpSdk {
             event_authority: pda::pump::event_authority().0,
             program: crate::pump::ID,
         };
+        // The boost PDAs follow the IDL's named accounts; the test
+        // `migrate_v2_appends_boost_pdas_after_named_accounts` pins the count.
         let mut metas = accounts.to_account_metas(None);
-        const MIGRATE_V2_NAMED_ACCOUNTS: usize = 27;
-        assert_eq!(
-            metas.len(),
-            MIGRATE_V2_NAMED_ACCOUNTS,
-            "MigrateV2 named-account layout changed; check latest IDL",
-        );
         metas.extend([
             AccountMeta::new_readonly(pda::pump_amm::boost_vault_authority(&pool).0, false),
             AccountMeta::new(
@@ -1307,6 +1303,34 @@ mod tests {
 
     fn usdc() -> Pubkey {
         key(7)
+    }
+
+    #[test]
+    fn migrate_v2_appends_boost_pdas_after_named_accounts() {
+        const MIGRATE_V2_NAMED_ACCOUNTS: usize = 27;
+        let (base, quote) = (key(1), usdc());
+        let ix = PumpSdk::new().migrate_v2_instruction(
+            base,
+            quote,
+            key(2),
+            key(3),
+            constants::SPL_TOKEN_2022_PROGRAM_ID,
+            constants::SPL_TOKEN_PROGRAM_ID,
+        );
+        assert_eq!(ix.accounts.len(), MIGRATE_V2_NAMED_ACCOUNTS + 2);
+        let pool = pda::pump_amm::canonical_pool(&base, &quote).0;
+        let boost = &ix.accounts[MIGRATE_V2_NAMED_ACCOUNTS..];
+        assert_eq!(
+            boost[0],
+            AccountMeta::new_readonly(pda::pump_amm::boost_vault_authority(&pool).0, false)
+        );
+        assert_eq!(
+            boost[1],
+            AccountMeta::new(
+                pda::pump_amm::boost_vault(&pool, &quote, &constants::SPL_TOKEN_PROGRAM_ID).0,
+                false
+            )
+        );
     }
 
     fn global(max_curve_depth: u8) -> Global {
