@@ -416,7 +416,6 @@ impl PumpSdk {
     /// v3 bonding curve buy: quote in → tokens out; past the remaining supply the
     /// leftover budget buys from the pool-to-be (`base_ata_amount` = the curve's base
     /// ATA balance). `input_amount_used` is what the program charges.
-    #[allow(clippy::too_many_arguments)]
     pub fn buy_quote_bonding_curve_v3_sol_in(
         &self,
         global: &Global,
@@ -445,7 +444,6 @@ impl PumpSdk {
 
     /// v3 bonding curve buy: fixed token out → quote cost, the post-completion leg
     /// included past the remaining supply (a mayhem curve fills only the remainder).
-    #[allow(clippy::too_many_arguments)]
     pub fn buy_quote_bonding_curve_v3_token_out(
         &self,
         global: &Global,
@@ -479,7 +477,6 @@ impl PumpSdk {
 
     /// `multi_hop_swap` output for `amount_in` of `in_mint` along `hops`, each hop
     /// priced on its pre-trade state; `min_out` is at least 1 (the program requires it).
-    #[allow(clippy::too_many_arguments)]
     pub fn quote_multi_hop_swap(
         &self,
         global: &Global,

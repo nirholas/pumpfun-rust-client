@@ -277,7 +277,6 @@ impl HopFees {
 /// hop and charging only the components in `legs`. A buy spends the whole input.
 /// Non-pump and mayhem pools, and a cashback pool on a creator leg, are
 /// [`QuoteError::VenueNotSupported`].
-#[allow(clippy::too_many_arguments)]
 pub fn multi_hop_pool_hop(
     global_config: &GlobalConfig,
     fee_config: &FeeConfig,

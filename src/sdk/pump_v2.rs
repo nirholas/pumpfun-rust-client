@@ -227,7 +227,6 @@ impl PumpSdk {
     /// exist yet. `virtual_quote_reserves` comes from
     /// [`Self::initial_virtual_quote_reserves`] (or
     /// [`Self::pump_quote_initial_virtual_quote_reserves`] for a pump-coin quote).
-    #[allow(clippy::too_many_arguments)]
     pub fn initial_bonding_curve(
         global: &Global,
         creator: Pubkey,
@@ -276,7 +275,6 @@ impl PumpSdk {
     /// coins only (ignored on SOL / `Global`-whitelisted quotes). A nonzero value requires
     /// `Global.creator_fee_configurable`, a non-cashback coin, and
     /// `1..=Global.max_configurable_creator_fee_bps`.
-    #[allow(clippy::too_many_arguments)]
     pub fn create_v2_instruction(
         &self,
         mint: Pubkey,
@@ -734,7 +732,6 @@ impl PumpSdk {
     /// append [`Self::agent_initialize_instruction`] in the same tx (mirrors
     /// the frontend's tokenized-agent flow). On a pump-coin quote, extend the
     /// first instruction with [`Self::create_v2_pump_quote_accounts`].
-    #[allow(clippy::too_many_arguments)]
     pub fn create_v2_and_buy_instruction(
         &self,
         mint: Pubkey,

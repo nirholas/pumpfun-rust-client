@@ -230,7 +230,6 @@ pub fn buy_v3_token_amount_from_sol_amount(
 /// charging only the fee components in `flags` ([`crate::math::amm::HopFees::curve_flags`]).
 /// A buy spends the whole input; past the remaining supply it takes the post-completion leg.
 /// Mayhem curves are refused (pump `MultiHopMayhemCurveNotSupported`).
-#[allow(clippy::too_many_arguments)]
 pub fn multi_hop_curve_hop(
     global: &Global,
     fee_config: &FeeConfig,

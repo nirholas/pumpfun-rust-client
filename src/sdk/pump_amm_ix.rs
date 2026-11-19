@@ -814,7 +814,6 @@ impl PumpSdk {
     /// (must exist, never debited or credited, so no wrap / `sync_native`).
     /// Budget `amount_in` plus rent (volume accumulator, curve extension) on a
     /// SOL buy. A route starting or ending on a wSOL pool still moves wSOL.
-    #[allow(clippy::too_many_arguments)]
     pub fn multi_hop_swap_instruction(
         &self,
         user: Pubkey,
@@ -873,7 +872,6 @@ impl PumpSdk {
     /// [`Self::multi_hop_swap_instruction`] behind idempotent creates of the
     /// buyback recipient's ATA, the user's output ATA and, on a buy route
     /// starting on a SOL curve, the user's (undebited) wSOL ATA (the user pays).
-    #[allow(clippy::too_many_arguments)]
     pub fn multi_hop_swap_instructions(
         &self,
         user: Pubkey,
