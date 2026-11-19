@@ -21,11 +21,11 @@ pub fn swap_exact_input(amount: u128, in_reserve: u128, out_reserve: u128) -> Qu
     mul_div_u128(amount, out_reserve, denom)
 }
 
-/// `value * (10_000 + bps) / 10_000`. Saturates on the rare case the
-/// multiplication itself overflows `u64`.
+/// `value * (10_000 + bps) / 10_000`, saturating at `u64::MAX`.
 #[inline]
 pub fn add_slippage(value: u64, bps: u16) -> u64 {
-    (((value as u128) * (10_000 + bps as u128)) / 10_000) as u64
+    let scaled = u128::from(value) * (10_000 + u128::from(bps)) / 10_000;
+    u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
 /// `value * (10_000 - bps) / 10_000`. `bps` larger than 10_000 saturates to 0.
@@ -52,6 +52,15 @@ mod tests {
         assert_eq!(add_slippage(100, 250), 102);
         assert_eq!(sub_slippage(1_000_000, 10_000), 0);
         assert_eq!(sub_slippage(1_000_000, 20_000), 0);
+    }
+
+    // The result used to be truncated with `as u64`, wrapping a large max-input
+    // bound around to a small one.
+    #[test]
+    fn add_slippage_saturates_instead_of_wrapping() {
+        assert_eq!(add_slippage(u64::MAX, 1), u64::MAX);
+        assert_eq!(add_slippage(u64::MAX / 2 + 1, u16::MAX), u64::MAX);
+        assert_eq!(add_slippage(u64::MAX, 0), u64::MAX);
     }
 
     #[test]
