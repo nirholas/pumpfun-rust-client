@@ -119,14 +119,14 @@ pub fn is_pump_pool(base_mint: &Pubkey, pool_creator: &Pubkey) -> bool {
 
 /// Bonding-curve fees split into protocol and creator components. The
 /// AMM-style LP fee is not part of the bonding-curve fee model.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BondingCurveFeeBps {
     pub protocol_fee_bps: u64,
     pub creator_fee_bps: u64,
 }
 
 /// AMM fees split into LP, protocol, and coin-creator components.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AmmFeeBps {
     pub lp_fee_bps: u64,
     pub protocol_fee_bps: u64,

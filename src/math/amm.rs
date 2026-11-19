@@ -49,24 +49,37 @@ pub fn real_quote_reserve(pool: &Pool, quote_vault_balance: u64) -> QuoteResult<
         .ok_or(QuoteError::MathOverflow)
 }
 
+/// [`buy_quote_input`] result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuyQuoteInputResult {
+    /// Base tokens the quote input buys.
     pub base_amount_out: u64,
+    /// Quote swapped into the pool after fees.
     pub effective_quote: u64,
 }
 
+/// [`buy_base_input`] result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuyBaseInputResult {
+    /// Quote the buy costs, fees included.
     pub total_quote_in: u64,
+    /// Quote swapped into the pool, before fees.
     pub raw_quote_in: u64,
 }
 
+/// [`sell_base_input`] result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SellBaseInputResult {
+    /// Quote paid to the seller after fees.
     pub final_quote_out: u64,
+    /// Quote the pool pays out before fees.
     pub raw_quote_out: u64,
 }
 
 /// Common AMM trade context. `pool_creator` is the pool's anchor `creator`
 /// field; `coin_creator` is the per-coin creator that receives the
 /// coin-creator fee slice (set to `Pubkey::default()` to skip the slice).
+#[derive(Clone, Copy, Debug)]
 pub struct AmmContext<'a> {
     pub global_config: &'a GlobalConfig,
     pub fee_config: &'a FeeConfig,
