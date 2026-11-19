@@ -143,6 +143,7 @@ pub fn buy_quote_input(ctx: &AmmContext<'_>, quote_in: u64) -> QuoteResult<BuyQu
 }
 
 /// AMM buy: caller specifies desired tokens out, gets total SOL cost.
+/// [`QuoteError::MathOverflow`] when the cost does not fit in a `u64`.
 pub fn buy_base_input(ctx: &AmmContext<'_>, base_out: u64) -> QuoteResult<BuyBaseInputResult> {
     check_trading_enabled(ctx.global_config, true)?;
     ctx.check_reserves()?;
@@ -150,9 +151,11 @@ pub fn buy_base_input(ctx: &AmmContext<'_>, base_out: u64) -> QuoteResult<BuyBas
         return Err(QuoteError::BaseOutExceedsReserve);
     }
 
-    let numerator = (ctx.quote_reserve as u128) * (base_out as u128);
-    let denominator = (ctx.base_reserve as u128) - (base_out as u128);
-    let raw_quote = ceil_div(numerator, denominator);
+    let numerator = u128::from(ctx.quote_reserve) * u128::from(base_out);
+    let denominator = u128::from(ctx.base_reserve - base_out);
+    let raw_quote =
+        u64::try_from(ceil_div(numerator, denominator)).map_err(|_| QuoteError::MathOverflow)?;
+    let raw_quote = u128::from(raw_quote);
 
     let AmmFeeBps {
         lp_fee_bps,
@@ -176,7 +179,7 @@ pub fn buy_base_input(ctx: &AmmContext<'_>, base_out: u64) -> QuoteResult<BuyBas
     let total = raw_quote + lp + protocol + coin_creator;
 
     Ok(BuyBaseInputResult {
-        total_quote_in: total as u64,
+        total_quote_in: u64::try_from(total).map_err(|_| QuoteError::MathOverflow)?,
         raw_quote_in: raw_quote as u64,
     })
 }
@@ -186,8 +189,7 @@ pub fn sell_base_input(ctx: &AmmContext<'_>, base_in: u64) -> QuoteResult<SellBa
     check_trading_enabled(ctx.global_config, false)?;
     ctx.check_reserves()?;
 
-    let raw_quote = (ctx.quote_reserve as u128) * (base_in as u128)
-        / ((ctx.base_reserve as u128) + (base_in as u128));
+    let raw_quote = sell_quote(ctx.base_reserve, ctx.quote_reserve, base_in)?;
 
     let AmmFeeBps {
         lp_fee_bps,
@@ -551,6 +553,34 @@ mod tests {
             );
         }
         assert!(hop(&cashback, true, 1_000_000_000, HopFees::for_hop(true, 0, 2)).is_ok());
+    }
+
+    // A cost past u64 used to be truncated with `as u64`.
+    #[test]
+    fn buy_base_input_overflows_instead_of_truncating() {
+        let gc = GlobalConfig::default();
+        let fc = fee_config(20, 5, 5);
+        let pool = pump_pool();
+        let ctx = AmmContext {
+            global_config: &gc,
+            fee_config: &fc,
+            base_mint: &pool.base_mint,
+            pool_creator: &pool.creator,
+            coin_creator: &pool.coin_creator,
+            quote_mint: &pool.quote_mint,
+            creator_fee_bps: 0,
+            base_reserve: u64::MAX,
+            quote_reserve: u64::MAX,
+            base_mint_supply: 0,
+            real_quote_reserve: u64::MAX,
+        };
+        assert_eq!(
+            buy_base_input(&ctx, u64::MAX - 1).err(),
+            Some(QuoteError::MathOverflow)
+        );
+        let small = buy_base_input(&ctx, 1_000).unwrap();
+        assert_eq!(small.raw_quote_in, 1_001);
+        assert!(small.total_quote_in > small.raw_quote_in);
     }
 
     #[test]

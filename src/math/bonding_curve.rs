@@ -67,7 +67,7 @@ fn buy_tokens_exact_in(
 ///
 /// Returns `Ok(0)` for zero input or for a migrated curve. Returns
 /// `Err(DepletedBondingCurve)` if the capped trade size would empty the
-/// curve.
+/// curve, and `Err(MathOverflow)` if the cost does not fit in a `u64`.
 pub fn buy_sol_amount_from_token_amount(
     global: &Global,
     fee_config: &FeeConfig,
@@ -84,12 +84,15 @@ pub fn buy_sol_amount_from_token_amount(
         return Err(QuoteError::DepletedBondingCurve);
     }
 
-    let sol_cost = min_amount * (bonding_curve.virtual_quote_reserves as u128)
-        / ((bonding_curve.virtual_token_reserves as u128) - min_amount)
-        + 1;
+    let sol_cost = mul_div_u128(
+        min_amount,
+        u128::from(bonding_curve.virtual_quote_reserves),
+        u128::from(bonding_curve.virtual_token_reserves) - min_amount,
+    )? + 1;
+    let sol_cost = u128::from(u64::try_from(sol_cost).map_err(|_| QuoteError::MathOverflow)?);
 
     let fee = fee_for_quote(global, fee_config, bonding_curve, mint_supply, sol_cost)?;
-    Ok((sol_cost + fee) as u64)
+    u64::try_from(sol_cost + fee).map_err(|_| QuoteError::MathOverflow)
 }
 
 /// SOL received for selling a token amount on the bonding curve, after
@@ -107,14 +110,18 @@ pub fn sell_sol_amount_from_token_amount(
         return Ok(0);
     }
 
-    let sol_out = (token_amount as u128) * (bonding_curve.virtual_quote_reserves as u128)
-        / ((bonding_curve.virtual_token_reserves as u128) + (token_amount as u128));
+    let sol_out = sell_quote(
+        bonding_curve.virtual_quote_reserves,
+        bonding_curve.virtual_token_reserves,
+        token_amount,
+    )?;
 
     let fee = fee_for_quote(global, fee_config, bonding_curve, mint_supply, sol_out)?;
-    if (sol_out as i128) - (fee as i128) < 0 {
-        return Err(QuoteError::FeesExceedOutput);
-    }
-    Ok((sol_out - fee) as u64)
+    let net = sol_out
+        .checked_sub(fee)
+        .ok_or(QuoteError::FeesExceedOutput)?;
+    // `sol_out < virtual_quote_reserves`, so the net always fits.
+    u64::try_from(net).map_err(|_| QuoteError::MathOverflow)
 }
 
 /// Quote cost of a `buy_v3` of `token_amount`, fees included. Past the remaining
@@ -206,7 +213,14 @@ pub fn buy_v3_token_amount_from_sol_amount(
     )?;
     Ok(
         match post_complete_leg_exact_quote(pool, bps, budget_left, false)? {
-            Some((base_out, leg_total)) => (remaining + base_out, curve_total + leg_total),
+            Some((base_out, leg_total)) => (
+                remaining
+                    .checked_add(base_out)
+                    .ok_or(QuoteError::MathOverflow)?,
+                curve_total
+                    .checked_add(leg_total)
+                    .ok_or(QuoteError::MathOverflow)?,
+            ),
             None => (remaining, curve_total),
         },
     )
@@ -291,7 +305,9 @@ pub fn multi_hop_curve_hop(
         curve_net,
     )?;
     let leg = post_complete_leg_exact_quote(pool, bps, budget_left, true)?;
-    Ok(remaining + leg.map_or(0, |(base_out, _)| base_out))
+    remaining
+        .checked_add(leg.map_or(0, |(base_out, _)| base_out))
+        .ok_or(QuoteError::MathOverflow)
 }
 
 /// pump `multi_hop_curve_swap` `hop_fees` bits.
@@ -409,14 +425,18 @@ fn post_complete_leg_exact_quote(
         net
     };
     let base_out = swap_exact_input(
-        u128::from(quote_in - 1),
+        u128::from(quote_in.checked_sub(1).ok_or(QuoteError::ZeroAmount)?),
         u128::from(pool_quote),
         u128::from(pool_base),
     )?;
     if base_out == 0 {
         return Ok(None);
     }
-    Ok(Some((base_out as u64, quote_in + fee + creator_fee)))
+    // `base_out < pool_base` and `quote_in + fees <= budget`.
+    Ok(Some((
+        u64::try_from(base_out).map_err(|_| QuoteError::MathOverflow)?,
+        quote_in + fee + creator_fee,
+    )))
 }
 
 /// Fee in lamports for a quote amount. The tier market cap uses the stored
@@ -778,6 +798,64 @@ mod tests {
         assert_eq!(
             buy_token_amount_from_sol_amount(&global, &fee_config, &curve, 0, 1),
             Ok(0)
+        );
+    }
+
+    // Reserves at the u64 limit: the cost used to be truncated with `as u64`
+    // into a small, wrong number.
+    #[test]
+    fn oversized_costs_overflow_instead_of_truncating() {
+        use crate::state::{BondingCurveFromIdl, GlobalFromIdl};
+        let global = Global::new(GlobalFromIdl::default());
+        let fee_config = fixture_fee_config(100, 50);
+        let curve = BondingCurve::new(BondingCurveFromIdl {
+            virtual_token_reserves: u64::MAX,
+            virtual_quote_reserves: u64::MAX,
+            real_token_reserves: u64::MAX - 1,
+            creator: Pubkey::new_unique(),
+            ..Default::default()
+        });
+        assert_eq!(
+            buy_sol_amount_from_token_amount(&global, &fee_config, &curve, 0, u64::MAX - 1),
+            Err(QuoteError::MathOverflow)
+        );
+        // Sells never exceed the quote reserve, so they still quote.
+        assert!(
+            sell_sol_amount_from_token_amount(&global, &fee_config, &curve, 0, u64::MAX).is_ok()
+        );
+    }
+
+    // An open curve with no token reserves (malformed or uninitialised data)
+    // used to divide by zero in the fee-tier market cap.
+    #[test]
+    fn zero_token_reserves_never_panic() {
+        let (global, fee_config, mut curve) = fresh_sol_curve();
+        curve.virtual_token_reserves = 0;
+        let user = Pubkey::new_unique();
+        assert_eq!(
+            buy_v3_sol_amount_from_token_amount(
+                &global,
+                &fee_config,
+                &curve,
+                0,
+                BASE_ATA,
+                u64::MAX
+            ),
+            Err(QuoteError::EmptyReserves)
+        );
+        assert_eq!(
+            multi_hop_curve_hop(
+                &global,
+                &fee_config,
+                &curve,
+                0,
+                BASE_ATA,
+                &user,
+                false,
+                1_000,
+                3
+            ),
+            Err(QuoteError::EmptyReserves)
         );
     }
 
