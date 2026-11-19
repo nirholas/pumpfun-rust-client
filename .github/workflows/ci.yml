@@ -12,17 +12,19 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
 
 jobs:
   ci:
-    name: fmt + clippy + test
+    name: fmt + clippy + test + doc
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Channel is pinned via rust-toolchain.toml (1.89.0), which overrides the
-      # toolchain for every cargo call. This action must install rustfmt +
-      # clippy for that EXACT version — keep it in sync with rust-toolchain.toml.
+      # Channel is pinned via rust-toolchain.toml (1.89.0, also the declared
+      # rust-version), which overrides the toolchain for every cargo call. This
+      # action must install rustfmt + clippy for that EXACT version — keep it in
+      # sync with rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
@@ -32,8 +34,41 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy
+      - name: cargo clippy (no features)
         run: cargo clippy --all-targets --no-deps --locked
 
+      - name: cargo clippy (client)
+        run: cargo clippy --all-targets --no-deps --locked --features client
+
+      # Unit tests, the offline IDL conformance test and doctests. The other
+      # integration tests need the local-validator feature and a running
+      # validator (`just build-and-test`).
       - name: cargo test
-        run: cargo test --all-targets --locked
+        run: cargo test --locked --features client
+
+      - name: cargo doc
+        run: cargo doc --no-deps --locked --features client
+
+      - name: cargo package --list
+        run: cargo package --list --locked
+
+  local-validator:
+    # Type-checks the binaries, examples and validator-backed tests, which only
+    # build with the local-validator feature (RocksDB, hidapi and etcd-client
+    # need libclang, libudev and protoc).
+    name: clippy (local-validator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: clippy
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev libudev-dev protobuf-compiler
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy (all features)
+        run: cargo clippy --all-targets --all-features --no-deps --locked
